@@ -13,6 +13,7 @@ import (
 
 	"github.com/vsayfb/gig-platform-chat-service/hub"
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
+	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/dto"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/grpcclient"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/httputil"
@@ -33,6 +34,8 @@ var upgrader = websocket.Upgrader{
 const (
 	closeAccessTokenExpired = 4001
 	closeReasonTokenExpired = "access_token_expired"
+	channelApplication      = "application"
+	channelDirect           = "direct"
 )
 
 // incomingMessage is what the client sends over WebSocket.
@@ -49,6 +52,14 @@ type outgoingMessage struct {
 	SentAt   string `json:"sent_at"`
 }
 
+type outgoingDirectMessage struct {
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	SenderID       string `json:"sender_id"`
+	Content        string `json:"content"`
+	SentAt         string `json:"sent_at"`
+}
+
 type outgoingError struct {
 	Type    string `json:"type"`
 	Code    string `json:"code"`
@@ -56,29 +67,32 @@ type outgoingError struct {
 }
 
 type WSHandler struct {
-	hub            *hub.Hub
-	jwtSvc         *jwt.Service
-	applicationSvc application.Service
-	userClient     *grpcclient.UserClient
-	gigClient      *grpcclient.GigClient
-	publisher      *mysqs.Publisher
+	hub             *hub.Hub
+	jwtSvc          *jwt.Service
+	applicationSvc  application.Service
+	conversationSvc conversation.Service
+	userClient      *grpcclient.UserClient
+	gigClient       *grpcclient.GigClient
+	publisher       *mysqs.Publisher
 }
 
 func NewWSHandler(
 	h *hub.Hub,
 	jwtSvc *jwt.Service,
 	applicationSvc application.Service,
+	conversationSvc conversation.Service,
 	publisher *mysqs.Publisher,
 	userClient *grpcclient.UserClient,
 	gigClient *grpcclient.GigClient,
 ) *WSHandler {
 	return &WSHandler{
-		hub:            h,
-		jwtSvc:         jwtSvc,
-		applicationSvc: applicationSvc,
-		publisher:      publisher,
-		userClient:     userClient,
-		gigClient:      gigClient,
+		hub:             h,
+		jwtSvc:          jwtSvc,
+		applicationSvc:  applicationSvc,
+		conversationSvc: conversationSvc,
+		publisher:       publisher,
+		userClient:      userClient,
+		gigClient:       gigClient,
 	}
 }
 
@@ -172,6 +186,7 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	client := &hub.Client{
 		UserID:     senderID,
 		ReceiverID: receiver.ID,
+		Channel:    channelApplication,
 		Conn:       conn,
 	}
 
@@ -404,7 +419,7 @@ func (h *WSHandler) handleMessage(
 	}
 
 	// Deliver immediately if the recipient is online.
-	if h.hub.Send(receiver.ID, payload) {
+	if h.hub.SendChannel(receiver.ID, channelApplication, payload) {
 		return
 	}
 
@@ -439,6 +454,217 @@ func (h *WSHandler) handleMessage(
 			"receiver_id", receiver.ID,
 			"error", err,
 		)
+	}
+}
+
+// ServeDirectWS handles casual, non-application direct conversations.
+//
+// First contact:
+//
+//	token=<jwt>, targetID=<uuid>
+//
+// Reconnect:
+//
+//	token=<jwt>, conversationID=<mongoObjectID>
+func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		httputil.WriteError(w, http.StatusUnauthorized, "missing token")
+		return
+	}
+
+	claims, err := h.jwtSvc.Verify(token)
+	if err != nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+
+	sender := dto.Sender{
+		ID:        claims.Subject,
+		Name:      claims.Name,
+		AvatarURL: claims.AvatarURL,
+	}
+
+	targetID, err := h.resolveDirectTarget(ctx, r, sender.ID)
+	if err != nil {
+		h.writeDirectResolveError(w, ctx, err)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		slog.ErrorContext(ctx, "ws: direct upgrade failed", "error", err)
+		return
+	}
+
+	client := &hub.Client{
+		UserID:     sender.ID,
+		ReceiverID: targetID,
+		Channel:    channelDirect,
+		Conn:       conn,
+	}
+	h.hub.Register(client)
+
+	expiryTimer := time.AfterFunc(time.Until(claims.ExpiresAt.Time), func() {
+		_ = client.Close(closeAccessTokenExpired, closeReasonTokenExpired)
+		_ = conn.Close()
+	})
+
+	defer func() {
+		expiryTimer.Stop()
+		h.hub.Unregister(client)
+		_ = conn.Close()
+		slog.InfoContext(ctx, "ws: direct client disconnected", "user_id", sender.ID)
+	}()
+
+	slog.InfoContext(ctx, "ws: direct client connected",
+		"user_id", sender.ID, "target_id", targetID)
+
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(
+				err,
+				websocket.CloseGoingAway,
+				websocket.CloseAbnormalClosure,
+				closeAccessTokenExpired,
+			) {
+				slog.ErrorContext(ctx, "ws: direct read error", "user_id", sender.ID, "error", err)
+			}
+			break
+		}
+
+		var incoming incomingMessage
+		if err := json.Unmarshal(raw, &incoming); err != nil {
+			h.writeClientError(client, "invalid_message", "Invalid message format.")
+			continue
+		}
+		if incoming.Content == "" {
+			continue
+		}
+		h.handleDirectMessage(client, sender, targetID, incoming.Content)
+	}
+}
+
+func (h *WSHandler) resolveDirectTarget(
+	ctx context.Context,
+	r *http.Request,
+	senderID string,
+) (string, error) {
+	if idParam := r.URL.Query().Get("conversationID"); idParam != "" {
+		id, err := bson.ObjectIDFromHex(idParam)
+		if err != nil {
+			return "", badRequest("invalid conversationID", err)
+		}
+		item, err := h.conversationSvc.Get(ctx, id, senderID)
+		if err != nil {
+			return "", err
+		}
+		return conversation.OtherDirectMember(item, senderID)
+	}
+
+	targetID := r.URL.Query().Get("targetID")
+	if targetID == "" {
+		return "", badRequest("missing targetID", nil)
+	}
+	if targetID == senderID {
+		return "", &resolveError{status: http.StatusConflict, msg: "cannot connect to yourself"}
+	}
+	if _, err := h.userClient.GetUser(ctx, targetID); err != nil {
+		return "", internalError("internal server error", err)
+	}
+	return targetID, nil
+}
+
+func (h *WSHandler) writeDirectResolveError(
+	w http.ResponseWriter,
+	ctx context.Context,
+	err error,
+) {
+	var rerr *resolveError
+	switch {
+	case errors.As(err, &rerr):
+		if rerr.cause != nil {
+			slog.WarnContext(ctx, "ws: direct resolve failed", "error", rerr.cause)
+		}
+		httputil.WriteError(w, rerr.status, rerr.msg)
+	case errors.Is(err, conversation.ErrNotFound):
+		httputil.WriteError(w, http.StatusNotFound, "conversation not found")
+	case errors.Is(err, conversation.ErrForbidden):
+		httputil.WriteError(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, conversation.ErrInvalidDirectConversation):
+		httputil.WriteError(w, http.StatusConflict, "not a direct conversation")
+	default:
+		slog.ErrorContext(ctx, "ws: direct resolve failed", "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "internal server error")
+	}
+}
+
+func (h *WSHandler) handleDirectMessage(
+	client *hub.Client,
+	sender dto.Sender,
+	targetID string,
+	content string,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	msg, _, err := h.conversationSvc.SendDirectMessage(
+		ctx,
+		sender.ID,
+		targetID,
+		content,
+	)
+	if err != nil {
+		slog.ErrorContext(ctx, "ws: send direct message failed",
+			"sender_id", sender.ID, "target_id", targetID, "error", err)
+		h.writeClientError(client, "send_failed", "Message could not be sent.")
+		return
+	}
+
+	outgoing := outgoingDirectMessage{
+		Type:           "message",
+		ConversationID: msg.ConversationID.Hex(),
+		SenderID:       msg.SenderID,
+		Content:        msg.Content,
+		SentAt:         msg.SentAt.Format(time.RFC3339),
+	}
+	payload, err := json.Marshal(outgoing)
+	if err != nil {
+		slog.ErrorContext(ctx, "ws: marshal direct message failed", "error", err)
+		return
+	}
+
+	if h.hub.SendRoute(targetID, channelDirect, sender.ID, payload) {
+		return
+	}
+
+	event := sqs.Envelope{
+		Type: mysqs.EventNewMessage,
+		Payload: mysqs.NewMessageNotificationEvent{
+			RecipientID:    targetID,
+			SenderID:       sender.ID,
+			SenderName:     sender.Name,
+			ThreadID:       outgoing.ConversationID,
+			MessageID:      msg.ID.Hex(),
+			MessagePreview: truncateForNotification(content, 30),
+			OccurredAt:     time.Now().UTC(),
+		},
+	}
+	if err := h.publisher.PublishNewMessage(ctx, event); err != nil {
+		slog.ErrorContext(ctx, "ws: publish direct notification failed",
+			"conversation_id", outgoing.ConversationID, "error", err)
+	}
+}
+
+func (h *WSHandler) writeClientError(client *hub.Client, code, message string) {
+	payload, err := json.Marshal(outgoingError{Type: "error", Code: code, Message: message})
+	if err != nil {
+		return
+	}
+	if err := client.Send(payload); err != nil {
+		h.hub.Unregister(client)
 	}
 }
 

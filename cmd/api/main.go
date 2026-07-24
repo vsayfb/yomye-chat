@@ -17,6 +17,7 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/config"
 	"github.com/vsayfb/gig-platform-chat-service/hub"
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
+	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
 	"github.com/vsayfb/gig-platform-chat-service/internal/ws"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/awsclient"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/database"
@@ -73,6 +74,14 @@ func main() {
 
 	applicationHandler := application.NewApplicationHandler(applicationSvc)
 
+	conversationRepo := conversation.NewRepository(db)
+	if err := conversationRepo.EnsureIndexes(ctx); err != nil {
+		slog.Error("failed to ensure conversation indexes", "err", err)
+		os.Exit(1)
+	}
+	conversationSvc := conversation.NewService(conversationRepo)
+	conversationHandler := conversation.NewHandler(conversationSvc)
+
 	h := hub.New()
 
 	jwtSvc := jwt.New(cfg.JWTSecret)
@@ -92,7 +101,15 @@ func main() {
 
 	slog.InfoContext(ctx, "publisher initialized")
 
-	wsHandler := ws.NewWSHandler(h, jwtSvc, applicationSvc, sqsPublisher, userClient, gigClient)
+	wsHandler := ws.NewWSHandler(
+		h,
+		jwtSvc,
+		applicationSvc,
+		conversationSvc,
+		sqsPublisher,
+		userClient,
+		gigClient,
+	)
 
 	shutdownTelemetry, err := telemetry.Init(ctx, cfg.ServiceName, cfg.OTelCollectorAddr)
 
@@ -142,16 +159,22 @@ func main() {
 	r.Use(middleware.TracingMiddleware)
 
 	r.Get("/ws", wsHandler.ServeWS)
+	r.Get("/ws/direct", wsHandler.ServeDirectWS)
 
+	authMiddleware := middleware.Auth(jwtSvc)
 	r.Route("/applications", func(r chi.Router) {
-		// TODO: implement a separate auth middleware for websocket upgrade
-		authMiddleware := middleware.Auth(jwtSvc)
-
 		r.With(authMiddleware).Get("/me", applicationHandler.ListApplications)
 		r.With(authMiddleware).Get("/{threadID}", applicationHandler.GetApplication)
 		r.With(authMiddleware).Get("/{threadID}/messages", applicationHandler.ListMessages)
 		r.With(authMiddleware).Post("/{threadID}/approve", applicationHandler.ApproveApplication)
 		r.With(authMiddleware).Post("/{threadID}/reject", applicationHandler.RejectApplication)
+	})
+
+	r.Route("/conversations", func(r chi.Router) {
+		r.Use(authMiddleware)
+		r.Get("/me", conversationHandler.List)
+		r.Get("/{conversationID}", conversationHandler.Get)
+		r.Get("/{conversationID}/messages", conversationHandler.ListMessages)
 	})
 
 	slog.InfoContext(ctx, "all dependencies injected")
