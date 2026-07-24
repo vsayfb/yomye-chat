@@ -10,54 +10,68 @@ type Client struct {
 	UserID     string
 	ReceiverID string
 	Conn       *websocket.Conn
+	writeMu    sync.Mutex
+}
+
+func (c *Client) Send(msg []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.Conn.WriteMessage(websocket.TextMessage, msg)
 }
 
 type Hub struct {
 	mu          sync.RWMutex
-	connections map[string]*Client // userID → Client
+	connections map[string]map[*Client]struct{} // userID → active devices/tabs
 }
 
 func New() *Hub {
 	return &Hub{
-		connections: make(map[string]*Client),
+		connections: make(map[string]map[*Client]struct{}),
 	}
 }
 
 func (h *Hub) Register(client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.connections[client.UserID] = client
+	if h.connections[client.UserID] == nil {
+		h.connections[client.UserID] = make(map[*Client]struct{})
+	}
+	h.connections[client.UserID][client] = struct{}{}
 }
 
-func (h *Hub) Unregister(userID string) {
+func (h *Hub) Unregister(client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.connections, userID)
+	clients := h.connections[client.UserID]
+	delete(clients, client)
+	if len(clients) == 0 {
+		delete(h.connections, client.UserID)
+	}
 }
 
-// Returns false if the user is not connected.
+// Send writes to every active connection for the user and reports whether at
+// least one delivery succeeded.
 func (h *Hub) Send(userID string, msg []byte) bool {
 	h.mu.RLock()
-
-	client, ok := h.connections[userID]
-
+	clients := make([]*Client, 0, len(h.connections[userID]))
+	for client := range h.connections[userID] {
+		clients = append(clients, client)
+	}
 	h.mu.RUnlock()
 
-	if !ok {
-		return false
+	delivered := false
+	for _, client := range clients {
+		if err := client.Send(msg); err != nil {
+			h.Unregister(client)
+			continue
+		}
+		delivered = true
 	}
-
-	if err := client.Conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-		h.Unregister(userID)
-		return false
-	}
-
-	return true
+	return delivered
 }
 
 func (h *Hub) IsConnected(userID string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	_, ok := h.connections[userID]
-	return ok
+	return len(h.connections[userID]) > 0
 }

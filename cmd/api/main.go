@@ -64,6 +64,11 @@ func main() {
 
 	applicationRepo := application.NewApplicationRepository(db)
 
+	if err := applicationRepo.EnsureIndexes(ctx); err != nil {
+		slog.Error("failed to ensure application indexes", "err", err)
+		os.Exit(1)
+	}
+
 	applicationSvc := application.NewApplicationService(applicationRepo)
 
 	applicationHandler := application.NewApplicationHandler(applicationSvc)

@@ -3,9 +3,13 @@ package application
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sort"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 var (
@@ -252,19 +256,29 @@ func (s *applicationService) SendMessage(
 		now := time.Now().UTC()
 
 		app = &Application{
-			GigID:         gigID,
-			InitiatorID:   senderID,
-			TargetID:      targetID,
-			Status:        ApplicationStatusPending,
-			LastMessage:   content,
-			LastMessageAt: now,
+			GigID:           gigID,
+			ConversationKey: conversationKey(gigID, senderID, targetID),
+			InitiatorID:     senderID,
+			TargetID:        targetID,
+			Status:          ApplicationStatusPending,
+			LastMessage:     content,
+			LastMessageAt:   now,
 		}
 
 		if err := s.repo.CreateApplication(ctx, app); err != nil {
+			if mongo.IsDuplicateKeyError(err) {
+				return s.SendMessage(ctx, senderID, targetID, gigID, content)
+			}
 			return nil, false, err
 		}
 
 		msg, err := s.persistMessage(ctx, app.ID, senderID, content)
+		if err != nil {
+			if cleanupErr := s.repo.DeleteApplication(ctx, app.ID); cleanupErr != nil {
+				slog.ErrorContext(ctx, "failed to clean up incomplete application",
+					"thread_id", app.ID.Hex(), "error", cleanupErr)
+			}
+		}
 
 		return msg, true, err
 	}
@@ -329,8 +343,17 @@ func (s *applicationService) persistMessage(
 		content,
 		now,
 	); err != nil {
-		return nil, err
+		// The message is already durable. Report success to prevent clients from
+		// retrying and creating a duplicate; list ordering can be repaired later.
+		slog.ErrorContext(ctx, "failed to update application message metadata",
+			"thread_id", threadID.Hex(), "error", err)
 	}
 
 	return msg, nil
+}
+
+func conversationKey(gigID, userA, userB string) string {
+	users := []string{userA, userB}
+	sort.Strings(users)
+	return strings.Join([]string{gigID, users[0], users[1]}, "\x00")
 }

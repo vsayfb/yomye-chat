@@ -37,10 +37,17 @@ type incomingMessage struct {
 
 // outgoingMessage is what we deliver to the recipient.
 type outgoingMessage struct {
+	Type     string `json:"type,omitempty"`
 	ThreadID string `json:"thread_id"`
 	SenderID string `json:"sender_id"`
 	Content  string `json:"content"`
 	SentAt   string `json:"sent_at"`
+}
+
+type outgoingError struct {
+	Type    string `json:"type"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type WSHandler struct {
@@ -168,7 +175,7 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	slog.InfoContext(ctx, "ws: client connected", "userID", senderID, "ReceiverID", receiver.ID, "gigID", gig.ID)
 
 	defer func() {
-		h.hub.Unregister(senderID)
+		h.hub.Unregister(client)
 		conn.Close()
 		slog.InfoContext(ctx, "ws: client disconnected", "userID", senderID)
 	}()
@@ -195,7 +202,7 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		h.handleMessage(*sender, *receiver, *gig, incoming.Content)
+		h.handleMessage(client, *sender, *receiver, *gig, incoming.Content)
 	}
 }
 
@@ -329,6 +336,7 @@ func (h *WSHandler) writeResolveError(w http.ResponseWriter, ctx context.Context
 }
 
 func (h *WSHandler) handleMessage(
+	client *hub.Client,
 	sender dto.Sender,
 	receiver dto.Receiver,
 	gig dto.Gig,
@@ -336,7 +344,8 @@ func (h *WSHandler) handleMessage(
 ) {
 	// Use a background context since the request context is cancelled when the
 	// WebSocket disconnects, but persistence and notification should still complete.
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	msg, isNewThread, err := h.applicationSvc.SendMessage(
 		ctx,
@@ -356,19 +365,12 @@ func (h *WSHandler) handleMessage(
 			"error", err,
 		)
 
-		// TODO: Send structured error back to the sender.
-		//
-		// Example:
-		// {
-		//   "type": "error",
-		//   "code": "application_pending",
-		//   "message": "Waiting for the recipient to approve your application."
-		// }
-
+		h.sendMessageError(client, err)
 		return
 	}
 
 	outgoing := outgoingMessage{
+		Type:     "message",
 		ThreadID: msg.ThreadID.Hex(),
 		SenderID: msg.SenderID,
 		Content:  msg.Content,
@@ -423,6 +425,33 @@ func (h *WSHandler) handleMessage(
 			"receiver_id", receiver.ID,
 			"error", err,
 		)
+	}
+}
+
+func (h *WSHandler) sendMessageError(client *hub.Client, err error) {
+	code, message := "send_failed", "Message could not be sent."
+
+	switch {
+	case errors.Is(err, application.ErrApplicationPending):
+		code, message = "application_pending", "Waiting for the recipient to approve your application."
+	case errors.Is(err, application.ErrApplicationMustBeApproved):
+		code, message = "application_must_be_approved", "Approve the application before sending messages."
+	case errors.Is(err, application.ErrApplicationRejected):
+		code, message = "application_rejected", "This application was rejected."
+	case errors.Is(err, application.ErrApplicationArchived):
+		code, message = "application_archived", "This application was archived."
+	case errors.Is(err, application.ErrForbidden):
+		code, message = "forbidden", "You cannot send a message in this thread."
+	}
+
+	payload, marshalErr := json.Marshal(outgoingError{
+		Type: "error", Code: code, Message: message,
+	})
+	if marshalErr != nil {
+		return
+	}
+	if writeErr := client.Send(payload); writeErr != nil {
+		h.hub.Unregister(client)
 	}
 }
 

@@ -18,7 +18,8 @@ const (
 type Application struct {
 	ID bson.ObjectID `bson:"_id,omitempty" json:"id"`
 
-	GigID string `bson:"gig_id" json:"gig_id"`
+	GigID           string `bson:"gig_id" json:"gig_id"`
+	ConversationKey string `bson:"conversation_key,omitempty" json:"-"`
 
 	InitiatorID string `bson:"initiator_id" json:"initiator_id"`
 	TargetID    string `bson:"target_id" json:"target_id"`

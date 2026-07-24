@@ -11,6 +11,8 @@ import (
 )
 
 type Repository interface {
+	EnsureIndexes(ctx context.Context) error
+
 	// Applications
 
 	FindApplicationByParticipants(
@@ -34,6 +36,8 @@ type Repository interface {
 		ctx context.Context,
 		application *Application,
 	) error
+
+	DeleteApplication(ctx context.Context, threadID bson.ObjectID) error
 
 	UpdateApplicationStatus(
 		ctx context.Context,
@@ -80,6 +84,19 @@ func NewApplicationRepository(db *mongo.Database) Repository {
 	}
 }
 
+func (r *applicationRepository) EnsureIndexes(ctx context.Context) error {
+	_, err := r.applications.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "conversation_key", Value: 1}},
+		Options: options.Index().
+			SetName("unique_conversation").
+			SetUnique(true).
+			SetPartialFilterExpression(bson.M{
+				"conversation_key": bson.M{"$type": "string"},
+			}),
+	})
+	return err
+}
+
 func (r *applicationRepository) FindApplicationByParticipants(
 	ctx context.Context,
 	gigID string,
@@ -88,13 +105,15 @@ func (r *applicationRepository) FindApplicationByParticipants(
 ) (*Application, error) {
 
 	filter := bson.M{
-		"gig_id": gigID,
 		"$or": bson.A{
+			bson.M{"conversation_key": conversationKey(gigID, userA, userB)},
 			bson.M{
+				"gig_id":       gigID,
 				"initiator_id": userA,
 				"target_id":    userB,
 			},
 			bson.M{
+				"gig_id":       gigID,
 				"initiator_id": userB,
 				"target_id":    userA,
 			},
@@ -114,6 +133,14 @@ func (r *applicationRepository) FindApplicationByParticipants(
 	}
 
 	return &app, nil
+}
+
+func (r *applicationRepository) DeleteApplication(
+	ctx context.Context,
+	threadID bson.ObjectID,
+) error {
+	_, err := r.applications.DeleteOne(ctx, bson.M{"_id": threadID})
+	return err
 }
 
 func (r *applicationRepository) CreateApplication(

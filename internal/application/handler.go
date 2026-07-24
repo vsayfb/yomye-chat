@@ -1,6 +1,7 @@
 package application
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -64,24 +65,14 @@ func (h *ApplicationHandler) GetApplication(
 
 	app, err := h.applicationSvc.GetApplication(ctx, threadID, userID)
 
-	if app.InitiatorID != userID &&
-		app.TargetID != userID {
-
-		httputil.WriteError(
-			w,
-			http.StatusForbidden,
-			"Forbidden",
-		)
-
-		return
-	}
-
 	if err != nil {
 
-		switch err {
+		switch {
 
-		case ErrApplicationNotFound:
+		case errors.Is(err, ErrApplicationNotFound):
 			httputil.WriteError(w, http.StatusNotFound, "Application not found")
+		case errors.Is(err, ErrForbidden):
+			httputil.WriteError(w, http.StatusForbidden, "Forbidden")
 
 		default:
 			slog.ErrorContext(
@@ -158,19 +149,26 @@ func (h *ApplicationHandler) ListMessages(
 	messages, err := h.applicationSvc.ListMessages(ctx, userID, threadID, limit, before)
 
 	if err != nil {
+		switch {
+		case errors.Is(err, ErrApplicationNotFound):
+			httputil.WriteError(w, http.StatusNotFound, "Application not found")
+		case errors.Is(err, ErrForbidden):
+			httputil.WriteError(w, http.StatusForbidden, "Forbidden")
+		default:
 
-		slog.ErrorContext(
-			ctx,
-			"failed to list messages",
-			"thread_id", threadIDHex,
-			"error", err,
-		)
+			slog.ErrorContext(
+				ctx,
+				"failed to list messages",
+				"thread_id", threadIDHex,
+				"error", err,
+			)
 
-		httputil.WriteError(
-			w,
-			http.StatusInternalServerError,
-			"Internal Server Error",
-		)
+			httputil.WriteError(
+				w,
+				http.StatusInternalServerError,
+				"Internal Server Error",
+			)
+		}
 
 		return
 	}
