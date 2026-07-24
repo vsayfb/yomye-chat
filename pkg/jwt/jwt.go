@@ -2,7 +2,6 @@ package jwt
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -25,13 +24,15 @@ type Claims struct {
 
 func (s *Service) Verify(tokenStr string) (*Claims, error) {
 
-	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-		}
-
-		return s.secret, nil
-	})
+	token, err := jwt.ParseWithClaims(
+		tokenStr,
+		&Claims{},
+		func(_ *jwt.Token) (any, error) {
+			return s.secret, nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithExpirationRequired(),
+	)
 
 	if err != nil || !token.Valid {
 		return nil, ErrInvalidToken

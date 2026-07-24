@@ -30,6 +30,11 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+const (
+	closeAccessTokenExpired = 4001
+	closeReasonTokenExpired = "access_token_expired"
+)
+
 // incomingMessage is what the client sends over WebSocket.
 type incomingMessage struct {
 	Content string `json:"content"`
@@ -174,7 +179,16 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 
 	slog.InfoContext(ctx, "ws: client connected", "userID", senderID, "ReceiverID", receiver.ID, "gigID", gig.ID)
 
+	expiryTimer := time.AfterFunc(time.Until(claims.ExpiresAt.Time), func() {
+		// Sending a close control frame gives clients a stable signal to refresh
+		// and reconnect. Closing the connection then unblocks the read loop even
+		// when the client is idle.
+		_ = client.Close(closeAccessTokenExpired, closeReasonTokenExpired)
+		_ = conn.Close()
+	})
+
 	defer func() {
+		expiryTimer.Stop()
 		h.hub.Unregister(client)
 		conn.Close()
 		slog.InfoContext(ctx, "ws: client disconnected", "userID", senderID)

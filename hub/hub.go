@@ -2,6 +2,7 @@ package hub
 
 import (
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -17,6 +18,18 @@ func (c *Client) Send(msg []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return c.Conn.WriteMessage(websocket.TextMessage, msg)
+}
+
+func (c *Client) Close(code int, reason string) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	deadline := time.Now().Add(5 * time.Second)
+	return c.Conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(code, reason),
+		deadline,
+	)
 }
 
 type Hub struct {
