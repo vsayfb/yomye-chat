@@ -1,0 +1,56 @@
+services:
+  chat-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chat-service
+    env_file:
+      - ./local.env
+
+    ports:
+      - "8081:8081"
+
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+    environment:
+      PORT: 8081
+
+      MONGODB_URI: mongodb://mongodb:27017
+      MONGODB_DATABASE: gig_platform_chat
+
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+
+      AWS_SQS_ENDPOINT: http://localstack:4566
+      AWS_SQS_QUEUE_URL: http://localstack:4566/000000000000/chat-events
+
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:8
+    container_name: chat-mongodb
+
+    restart: unless-stopped
+
+    ports:
+      - "27017:27017"
+
+    volumes:
+      - mongo-data:/data/db
+
+    healthcheck:
+      test: [ "CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mongo-data:
+
+networks:
+  default:
+    external: true
+    name: gig-platform

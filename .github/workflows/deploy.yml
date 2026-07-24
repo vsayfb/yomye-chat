@@ -1,0 +1,93 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+env:
+  SERVICE_NAME: chat
+  BUILD_PATH: ./cmd/api
+  PORT: "8081"
+  HEALTH_PATH: /health
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build
+        run: GOOS=linux GOARCH=amd64 go build -o bootstrap ${{ env.BUILD_PATH }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Upload artifact
+        id: upload
+        run: |
+          KEY="${{ env.SERVICE_NAME }}/${{ github.sha }}.bin"
+          aws s3 cp bootstrap "s3://${{ vars.DEPLOY_BUCKET }}/${KEY}"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy via SSM Run Command
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --targets "Key=tag:Name,Values=${{ vars.INSTANCE_NAME_TAG }}" \
+            --parameters commands="[
+              \"export SERVICE_NAME=${{ env.SERVICE_NAME }}\",
+              \"export BINARY_NAME=bootstrap\",
+              \"export S3_BUCKET=${{ vars.DEPLOY_BUCKET }}\",
+              \"export S3_KEY=${{ steps.upload.outputs.key }}\",
+              \"export PORT=${{ env.PORT }}\",
+              \"export HEALTH_PATH=${{ env.HEALTH_PATH }}\",
+              \"bash /opt/deploy/remote-deploy.sh\"
+            ]" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM command: $COMMAND_ID"
+
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:Name,Values=${{ vars.INSTANCE_NAME_TAG }}" \
+              "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --query "Status" \
+              --output text 2>/dev/null || echo "Pending")
+
+            echo "Status: $STATUS"
+
+            case "$STATUS" in
+              Success)
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut)
+                echo "Deploy failed. Check the SSM Run Command output in AWS Systems Manager."
+                exit 1
+                ;;
+            esac
+
+            sleep 10
+          done
+
+          echo "Timed out waiting for deployment."
+          exit 1

@@ -1,0 +1,336 @@
+package application
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+var (
+	ErrForbidden                 = errors.New("Forbidden")
+	ErrApplicationPending        = errors.New("Application is in pending status.")
+	ErrApplicationMustBeApproved = errors.New("Application must be approved by employer.")
+	ErrApplicationRejected       = errors.New("Application has rejected by employer.")
+	ErrApplicationArchived       = errors.New("Application has been archived.")
+	ErrInvalidApplicationStatus  = errors.New("Unknown application status.")
+	ErrApplicationNotFound       = errors.New("Application not found.")
+)
+
+type Service interface {
+	// Applications
+	ListApplications(ctx context.Context, userID string) ([]ApplicationSummary, error)
+	GetApplication(ctx context.Context, threadID bson.ObjectID, userID string) (*Application, error)
+
+	ApproveApplication(ctx context.Context, threadID bson.ObjectID, approverID string) error
+	RejectApplication(ctx context.Context, threadID bson.ObjectID, approverID string) error
+
+	ListMessages(
+		ctx context.Context,
+		userID string,
+		threadID bson.ObjectID,
+		limit int,
+		cursor *time.Time,
+	) ([]Message, error)
+
+	// Messages
+	// GetMessages(ctx context.Context, threadID bson.ObjectID, cursor *Cursor) ([]Message, error)
+
+	// SendMessage returns the persisted message and whether sending it
+	// created a brand-new thread (application) — i.e. this was the very
+	// first message between these participants for this gig.
+	SendMessage(
+		ctx context.Context,
+		senderID string,
+		targetID string,
+		gigID string,
+		content string,
+	) (msg *Message, isNewThread bool, err error)
+}
+
+type applicationService struct {
+	repo Repository
+}
+
+func NewApplicationService(repo Repository) *applicationService {
+	return &applicationService{
+		repo: repo,
+	}
+}
+
+// GetApplication returns the application identified by the given thread ID.
+func (s *applicationService) GetApplication(
+	ctx context.Context,
+	threadID bson.ObjectID,
+	userID string,
+) (*Application, error) {
+
+	app, err := s.repo.FindApplicationByID(ctx, threadID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if app == nil {
+		return nil, ErrApplicationNotFound
+	}
+
+	if app.InitiatorID != userID &&
+		app.TargetID != userID {
+		return nil, ErrForbidden
+	}
+
+	return app, nil
+}
+
+// ListApplications returns all applications the user participates in.
+func (s *applicationService) ListApplications(
+	ctx context.Context,
+	userID string,
+) ([]ApplicationSummary, error) {
+
+	apps, err := s.repo.ListApplications(ctx, userID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	summaries := make([]ApplicationSummary, 0, len(apps))
+
+	for _, app := range apps {
+		summaries = append(summaries, ApplicationSummary{
+			ThreadID: app.ID,
+			GigID:    app.GigID,
+		})
+	}
+
+	return summaries, nil
+}
+
+// ApproveApplication approves a pending application.
+// Only the target user may approve an application.
+func (s *applicationService) ApproveApplication(
+	ctx context.Context,
+	threadID bson.ObjectID,
+	approverID string,
+) error {
+
+	app, err := s.repo.FindApplicationByID(ctx, threadID)
+	if err != nil {
+		return err
+	}
+
+	if app == nil {
+		return ErrApplicationNotFound
+	}
+
+	if app.TargetID != approverID {
+		return ErrForbidden
+	}
+
+	if app.Status != ApplicationStatusPending {
+		return ErrInvalidApplicationStatus
+	}
+
+	return s.repo.UpdateApplicationStatus(
+		ctx,
+		threadID,
+		ApplicationStatusAccepted,
+	)
+}
+
+// RejectApplication rejects a pending application.
+// Only the target user may reject an application.
+func (s *applicationService) RejectApplication(
+	ctx context.Context,
+	threadID bson.ObjectID,
+	rejectorID string,
+) error {
+
+	app, err := s.repo.FindApplicationByID(ctx, threadID)
+
+	if err != nil {
+		return err
+	}
+
+	if app == nil {
+		return ErrApplicationNotFound
+	}
+
+	if app.TargetID != rejectorID {
+		return ErrForbidden
+	}
+
+	if app.Status != ApplicationStatusPending {
+		return ErrInvalidApplicationStatus
+	}
+
+	return s.repo.UpdateApplicationStatus(
+		ctx,
+		threadID,
+		ApplicationStatusRejected,
+	)
+}
+
+func (s *applicationService) ListMessages(
+	ctx context.Context,
+	userID string,
+	threadID bson.ObjectID,
+	limit int,
+	cursor *time.Time,
+) ([]Message, error) {
+
+	app, err := s.repo.FindApplicationByID(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+
+	if app == nil {
+		return nil, ErrApplicationNotFound
+	}
+
+	if app.InitiatorID != userID &&
+		app.TargetID != userID {
+		return nil, ErrForbidden
+	}
+
+	return s.repo.ListMessages(
+		ctx,
+		threadID,
+		limit,
+		cursor,
+	)
+}
+
+// SendMessage sends a message within the context of an application.
+//
+// If no application exists between the sender and target for the specified gig,
+// a new application is created in the Pending state and the message becomes the
+// initial application message.
+//
+// Once an application exists, message delivery is governed by the application's
+// current status:
+//
+//   - Pending:
+//     The initiator cannot send additional messages until the target explicitly
+//     approves the application. The target must approve the application before
+//     either participant can exchange messages.
+//
+//   - Accepted:
+//     Both participants may exchange messages freely.
+//
+//   - Rejected:
+//     No further messages are permitted.
+//
+//   - Archived:
+//     No further messages are permitted.
+//
+// The method updates the application's last message metadata whenever a message
+// is successfully persisted.
+func (s *applicationService) SendMessage(
+	ctx context.Context,
+	senderID string,
+	targetID string,
+	gigID string,
+	content string,
+) (*Message, bool, error) {
+
+	app, err := s.repo.FindApplicationByParticipants(
+		ctx,
+		gigID,
+		senderID,
+		targetID,
+	)
+
+	if err != nil {
+		return nil, false, err
+	}
+
+	// First message creates the application.
+	if app == nil {
+		now := time.Now().UTC()
+
+		app = &Application{
+			GigID:         gigID,
+			InitiatorID:   senderID,
+			TargetID:      targetID,
+			Status:        ApplicationStatusPending,
+			LastMessage:   content,
+			LastMessageAt: now,
+		}
+
+		if err := s.repo.CreateApplication(ctx, app); err != nil {
+			return nil, false, err
+		}
+
+		msg, err := s.persistMessage(ctx, app.ID, senderID, content)
+
+		return msg, true, err
+	}
+
+	isInitiator := app.InitiatorID == senderID
+	isTarget := app.TargetID == senderID
+
+	if !isInitiator && !isTarget {
+		return nil, false, ErrForbidden
+	}
+
+	switch app.Status {
+
+	case ApplicationStatusPending:
+		if isInitiator {
+			return nil, false, ErrApplicationPending
+		}
+
+		// Target must approve before Applicationting.
+		return nil, false, ErrApplicationMustBeApproved
+
+	case ApplicationStatusAccepted:
+		msg, err := s.persistMessage(ctx, app.ID, senderID, content)
+
+		return msg, false, err
+
+	case ApplicationStatusRejected:
+		return nil, false, ErrApplicationRejected
+
+	case ApplicationStatusArchived:
+		return nil, false, ErrApplicationArchived
+
+	default:
+		return nil, false, ErrInvalidApplicationStatus
+	}
+}
+
+func (s *applicationService) persistMessage(
+	ctx context.Context,
+	threadID bson.ObjectID,
+	senderID string,
+	content string,
+) (*Message, error) {
+
+	now := time.Now().UTC()
+
+	msg := &Message{
+		ThreadID: threadID,
+		SenderID: senderID,
+		Content:  content,
+		IsRead:   false,
+		SentAt:   now,
+	}
+
+	if err := s.repo.CreateMessage(ctx, msg); err != nil {
+		return nil, err
+	}
+
+	if err := s.repo.UpdateLastMessage(
+		ctx,
+		threadID,
+		content,
+		now,
+	); err != nil {
+		return nil, err
+	}
+
+	return msg, nil
+}

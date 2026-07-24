@@ -1,0 +1,128 @@
+# =========================
+# Go
+# =========================
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.out
+*.test
+*.prof
+*.coverprofile
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Vendor (uncomment if you don't commit vendor/)
+# vendor/
+
+# =========================
+# Environment
+# =========================
+.env
+.env.*
+!.env.example
+
+# Secrets
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+log/
+
+# =========================
+# Temporary
+# =========================
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# =========================
+# Build output
+# =========================
+bin/
+dist/
+build/
+release/
+
+# =========================
+# IDE
+# =========================
+
+## VS Code
+.vscode/
+
+## JetBrains
+.idea/
+*.iml
+
+## Fleet
+.fleet/
+
+## Vim
+*.sw?
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+
+# =========================
+# Test artifacts
+# =========================
+*.cover
+coverage/
+test-results/
+*.prof
+
+# =========================
+# Delve debugger
+# =========================
+__debug_bin
+
+# =========================
+# Air
+# =========================
+.air/
+.air.toml
+
+# =========================
+# Generated
+# =========================
+*.gen.go
+
+# =========================
+# Local databases
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+
+# =========================
+# Misc
+# =========================
+.cache/
