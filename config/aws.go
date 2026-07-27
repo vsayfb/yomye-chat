@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -34,6 +35,8 @@ func loadAWS(ctx context.Context) (*Config, error) {
 	ssmClient := ssm.NewFromConfig(awsCfg)
 
 	params, err := loadParameters(ctx, ssmClient)
+
+	slog.Info("Parameters are loaded", "params", params)
 
 	if err != nil {
 		return nil, err
