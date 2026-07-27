@@ -14,15 +14,11 @@ import (
 const ParameterPath = "/yevmiye/app/"
 
 const (
-	ParameterMongoURISecret                = "mongo-db-uri"
-	ParameterMongoDBName                   = "mongo-db-name"
-	ParameterSQSNotificationEventsQueueURL = "sqs-notification-events-queue-url"
-	ParameterJWTSecret                     = "jwt-secret"
+	ParameterMongoURISecret                = "mongo_db_uri"
+	ParameterMongoDBName                   = "mongo_db_name"
+	ParameterSQSNotificationEventsQueueURL = "sqs_notification_events_queue_url"
+	ParameterJWTSecret                     = "jwt_secret"
 )
-
-type mongoSecret struct {
-	URI string `json:"uri"`
-}
 
 func loadAWS(ctx context.Context) (*Config, error) {
 
