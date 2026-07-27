@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscfg "github.com/aws/aws-sdk-go-v2/config"
@@ -14,10 +13,10 @@ import (
 const ParameterPath = "/yevmiye/app/"
 
 const (
-	ParameterMongoURISecret                = "mongo_db_uri"
-	ParameterMongoDBName                   = "mongo_db_name"
-	ParameterSQSNotificationEventsQueueURL = "sqs_notification_events_queue_url"
-	ParameterJWTSecret                     = "jwt_secret"
+	ParameterMongoURISecret                = "mongo-db-uri"
+	ParameterMongoDBName                   = "mongo-db-name"
+	ParameterSQSNotificationEventsQueueURL = "sqs-notification-events-queue-url"
+	ParameterJWTSecret                     = "jwt-secret"
 )
 
 func loadAWS(ctx context.Context) (*Config, error) {
@@ -32,7 +31,9 @@ func loadAWS(ctx context.Context) (*Config, error) {
 
 	params, err := loadParameters(ctx, ssmClient)
 
-	slog.Info("Parameters are loaded", "params", params)
+	for k, v := range params {
+		slog.Info("info", "parameter", k, "value", v)
+	}
 
 	if err != nil {
 		return nil, err
@@ -59,7 +60,7 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 		parameter(ParameterSQSNotificationEventsQueueURL),
 	}
 
-	out, err := client.GetParameters(ctx, &ssm.GetParametersInput{
+	_, err := client.GetParameters(ctx, &ssm.GetParametersInput{
 		Names:          names,
 		WithDecryption: aws.Bool(true),
 	})
@@ -69,11 +70,6 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 	}
 
 	params := make(map[string]string)
-
-	for _, p := range out.Parameters {
-		key := strings.TrimPrefix(aws.ToString(p.Name), ParameterPath+"/")
-		params[key] = aws.ToString(p.Value)
-	}
 
 	return params, nil
 }
