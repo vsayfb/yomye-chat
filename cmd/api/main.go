@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,11 +32,92 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/pkg/tracing"
 )
 
+type telemetryState struct {
+	mu       sync.RWMutex
+	shutdown func(context.Context) error
+}
+
+func (t *telemetryState) set(shutdown func(context.Context) error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	t.shutdown = shutdown
+}
+
+func (t *telemetryState) shutdownTelemetry(ctx context.Context) error {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	return t.shutdown(ctx)
+}
+
+func initTelemetryWithRetry(
+	ctx context.Context,
+	cfg *config.Config,
+	logHandler slog.Handler,
+	state *telemetryState,
+) {
+	const (
+		retryInterval = 30 * time.Second
+		retryTimeout  = 5 * time.Minute
+	)
+
+	deadline := time.Now().Add(retryTimeout)
+
+	ticker := time.NewTicker(retryInterval)
+	defer ticker.Stop()
+
+	for {
+		shutdownTelemetry, err := telemetry.Init(
+			ctx,
+			cfg.ServiceName,
+			cfg.OTelCollectorAddr,
+		)
+
+		if err == nil {
+			select {
+			case <-ctx.Done():
+				shutdownTelemetry(ctx)
+				return
+			default:
+			}
+
+			state.set(shutdownTelemetry)
+
+			slog.SetDefault(
+				slog.New(tracing.NewOTelHandler(logHandler)),
+			)
+
+			slog.Info("telemetry initialized")
+			return
+		}
+
+		if time.Now().After(deadline) {
+			slog.Error(
+				"failed to initialize telemetry after retries",
+				"error", err,
+			)
+			return
+		}
+
+		slog.Warn(
+			"telemetry unavailable, retrying",
+			"retry_in", retryInterval,
+			"error", err,
+		)
+
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func main() {
 	ctx := context.Background()
 
 	cfg, err := config.Load(ctx)
-
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -43,7 +125,6 @@ func main() {
 	logHandler := logger.Init(cfg.AppEnv)
 
 	mongoClient, db, err := database.NewMongoDB(cfg.MongoURI, cfg.MongoDB)
-
 	if err != nil {
 		slog.Error("failed to connect to MongoDB", "err", err)
 		os.Exit(1)
@@ -52,7 +133,6 @@ func main() {
 	slog.InfoContext(ctx, "mongo connected")
 
 	grpcClient, err := grpcclient.NewGRPCConnection(cfg.UserServiceGRPCAddr)
-
 	if err != nil {
 		slog.Error("failed to create grpc client", "err", err)
 		os.Exit(1)
@@ -71,14 +151,15 @@ func main() {
 	}
 
 	applicationSvc := application.NewApplicationService(applicationRepo)
-
 	applicationHandler := application.NewApplicationHandler(applicationSvc)
 
 	conversationRepo := conversation.NewRepository(db)
+
 	if err := conversationRepo.EnsureIndexes(ctx); err != nil {
 		slog.Error("failed to ensure conversation indexes", "err", err)
 		os.Exit(1)
 	}
+
 	conversationSvc := conversation.NewService(conversationRepo)
 	conversationHandler := conversation.NewHandler(conversationSvc)
 
@@ -87,7 +168,6 @@ func main() {
 	jwtSvc := jwt.New(cfg.JWTSecret)
 
 	awsClient, err := awsclient.New(ctx, cfg)
-
 	if err != nil {
 		slog.Error("failed to initialize aws client", "err", err)
 		os.Exit(1)
@@ -96,10 +176,10 @@ func main() {
 	slog.InfoContext(ctx, "aws client initialized")
 
 	sqsClient := sqs.NewSQS(awsClient, cfg)
-
-	sqsPublisher := sqs.NewPublisher(sqsClient, cfg.AWS.SQSNotificationQueueURL)
-
-	slog.InfoContext(ctx, "publisher initialized")
+	sqsPublisher := sqs.NewPublisher(
+		sqsClient,
+		cfg.AWS.SQSNotificationQueueURL,
+	)
 
 	wsHandler := ws.NewWSHandler(
 		h,
@@ -111,19 +191,25 @@ func main() {
 		gigClient,
 	)
 
-	shutdownTelemetry, err := telemetry.Init(ctx, cfg.ServiceName, cfg.OTelCollectorAddr)
+	telemetryCtx, telemetryCancel := context.WithCancel(ctx)
 
-	if err != nil {
-		slog.Error("failed to initialize telemetry", "err", err)
-		os.Exit(1)
+	telemetryState := &telemetryState{
+		shutdown: func(context.Context) error {
+			return nil
+		},
 	}
+
+	go initTelemetryWithRetry(
+		telemetryCtx,
+		cfg,
+		logHandler,
+		telemetryState,
+	)
 
 	if err := metrics.Register(); err != nil {
 		slog.Error("failed to register metrics", "err", err)
 		os.Exit(1)
 	}
-
-	slog.SetDefault(slog.New(tracing.NewOTelHandler(logHandler)))
 
 	r := chi.NewRouter()
 
@@ -162,6 +248,7 @@ func main() {
 	r.Get("/ws/direct", wsHandler.ServeDirectWS)
 
 	authMiddleware := middleware.Auth(jwtSvc)
+
 	r.Route("/applications", func(r chi.Router) {
 		r.With(authMiddleware).Get("/me", applicationHandler.ListApplications)
 		r.With(authMiddleware).Get("/{threadID}", applicationHandler.GetApplication)
@@ -177,8 +264,6 @@ func main() {
 		r.Get("/{conversationID}/messages", conversationHandler.ListMessages)
 	})
 
-	slog.InfoContext(ctx, "all dependencies injected")
-
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: r,
@@ -188,7 +273,6 @@ func main() {
 
 	go func() {
 		slog.Info("Chat Service listening", "port", cfg.Port)
-
 		serverErr <- srv.ListenAndServe()
 	}()
 
@@ -210,26 +294,23 @@ func main() {
 		slog.Info("shutting down chat service")
 	}
 
+	telemetryCancel()
+
 	shutdownCtx, cancel := context.WithTimeout(
 		context.Background(),
 		10*time.Second,
 	)
-
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("failed to shutdown HTTP server", "err", err)
 	}
 
-	// if err := conn.Close(); err != nil {
-	// 	slog.Error("failed to close gRPC connection", "err", err)
-	// }
-
 	if err := mongoClient.Disconnect(shutdownCtx); err != nil {
 		slog.Error("failed to disconnect MongoDB", "err", err)
 	}
 
-	if err := shutdownTelemetry(shutdownCtx); err != nil {
+	if err := telemetryState.shutdownTelemetry(shutdownCtx); err != nil {
 		slog.Error("failed to shutdown telemetry", "err", err)
 	}
 
