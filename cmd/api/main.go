@@ -124,7 +124,8 @@ func main() {
 
 	logHandler := logger.Init(cfg.AppEnv)
 
-	mongoClient, db, err := database.NewMongoDB(cfg.MongoURI, cfg.MongoDB)
+	mongoClient, db, err := database.NewMongoDB(ctx, cfg.MongoURI, cfg.MongoDB)
+
 	if err != nil {
 		slog.Error("failed to connect to MongoDB", "err", err)
 		os.Exit(1)
