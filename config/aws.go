@@ -21,9 +21,7 @@ const (
 )
 
 func loadAWS(ctx context.Context) (*Config, error) {
-
 	awsCfg, err := awscfg.LoadDefaultConfig(ctx)
-
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
@@ -31,25 +29,54 @@ func loadAWS(ctx context.Context) (*Config, error) {
 	ssmClient := ssm.NewFromConfig(awsCfg)
 
 	params, err := loadParameters(ctx, ssmClient)
-
-	for k, v := range params {
-		slog.Info("info", "parameter", k, "value", v)
-	}
-
 	if err != nil {
 		return nil, err
 	}
 
+	// Log only parameter names, never values.
+	for k := range params {
+		slog.Debug("loaded SSM parameter", "name", k)
+	}
+
+	creds, err := awsCfg.Credentials.Retrieve(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("retrieve AWS credentials: %w", err)
+	}
+
+	var endpoint string
+	if awsCfg.BaseEndpoint != nil {
+		endpoint = *awsCfg.BaseEndpoint
+	}
+
 	return &Config{
-		ServiceName:         getEnv(EnvServiceName, DefaultServiceName),
-		AppEnv:              EnvironmentProduction,
-		Port:                getEnv(EnvServerPort, DefaultServerPort),
-		JWTSecret:           params[ParameterJWTSecret],
-		MongoURI:            params[ParameterMongoURISecret],
-		MongoDB:             params[ParameterMongoDBName],
-		UserServiceGRPCAddr: getEnv(EnvUserServiceGRPCAddr, DefaultUserServiceGRPCAddr),
-		MetricsServerPort:   getEnv(EnvMetricsServerPort, DefaultMetricsServerPort),
-		OTelCollectorAddr:   getEnv(EnvOTelCollectorAddr, DefaultOtelCollectorAddr),
+		ServiceName: getEnv(EnvServiceName, DefaultServiceName),
+		AppEnv:      EnvironmentProduction,
+		Port:        getEnv(EnvServerPort, DefaultServerPort),
+
+		JWTSecret: params[ParameterJWTSecret],
+		MongoURI:  params[ParameterMongoURISecret],
+		MongoDB:   params[ParameterMongoDBName],
+
+		AWS: AWSConfig{
+			Region:                  awsCfg.Region,
+			AccessKeyID:             creds.AccessKeyID,
+			SecretAccessKey:         creds.SecretAccessKey,
+			SQSEndpoint:             endpoint,
+			SQSNotificationQueueURL: params[ParameterSQSNotificationEventsQueueURL],
+		},
+
+		UserServiceGRPCAddr: getEnv(
+			EnvUserServiceGRPCAddr,
+			DefaultUserServiceGRPCAddr,
+		),
+		MetricsServerPort: getEnv(
+			EnvMetricsServerPort,
+			DefaultMetricsServerPort,
+		),
+		OTelCollectorAddr: getEnv(
+			EnvOTelCollectorAddr,
+			DefaultOtelCollectorAddr,
+		),
 	}, nil
 }
 
@@ -92,6 +119,20 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 		}
 
 		params[key] = value
+	}
+
+	// Verify that every expected parameter was returned.
+	required := []string{
+		ParameterJWTSecret,
+		ParameterMongoURISecret,
+		ParameterMongoDBName,
+		ParameterSQSNotificationEventsQueueURL,
+	}
+
+	for _, key := range required {
+		if _, ok := params[key]; !ok {
+			return nil, fmt.Errorf("required SSM parameter %q was not returned", key)
+		}
 	}
 
 	return params, nil
