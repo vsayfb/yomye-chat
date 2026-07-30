@@ -41,7 +41,8 @@ const (
 
 // incomingMessage is what the client sends over WebSocket.
 type incomingMessage struct {
-	Content string `json:"content"`
+	ClientMessageID string `json:"client_message_id,omitempty"`
+	Content         string `json:"content"`
 }
 
 // outgoingMessage is what we deliver to the recipient.
@@ -62,9 +63,19 @@ type outgoingDirectMessage struct {
 }
 
 type outgoingError struct {
-	Type    string `json:"type"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Type            string `json:"type"`
+	ClientMessageID string `json:"client_message_id,omitempty"`
+	Code            string `json:"code"`
+	Message         string `json:"message"`
+}
+
+type outgoingAccepted struct {
+	Type            string `json:"type"`
+	ClientMessageID string `json:"client_message_id,omitempty"`
+	MessageID       string `json:"message_id"`
+	ThreadID        string `json:"thread_id,omitempty"`
+	ConversationID  string `json:"conversation_id,omitempty"`
+	SentAt          string `json:"sent_at"`
 }
 
 type WSHandler struct {
@@ -225,18 +236,37 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 
 		if err := json.Unmarshal(raw, &incoming); err != nil {
 			slog.WarnContext(ctx, "ws: invalid message format", "userID", senderID)
+			h.writeClientError(client, "", "invalid_message", "Invalid message format.")
 			continue
 		}
 
 		if incoming.Content == "" {
+			h.writeClientError(
+				client,
+				incoming.ClientMessageID,
+				"empty_message",
+				"Message content cannot be empty.",
+			)
 			continue
 		}
 		if err := messagecontent.Validate(incoming.Content); err != nil {
-			h.writeClientError(client, "invalid_emoji", "Unsupported Yövmiye emoji.")
+			h.writeClientError(
+				client,
+				incoming.ClientMessageID,
+				"invalid_emoji",
+				"Unsupported Yövmiye emoji.",
+			)
 			continue
 		}
 
-		h.handleMessage(client, *sender, *receiver, *gig, incoming.Content)
+		h.handleMessage(
+			client,
+			*sender,
+			*receiver,
+			*gig,
+			incoming.ClientMessageID,
+			incoming.Content,
+		)
 	}
 }
 
@@ -374,6 +404,7 @@ func (h *WSHandler) handleMessage(
 	sender dto.Sender,
 	receiver dto.Receiver,
 	gig dto.Gig,
+	clientMessageID string,
 	content string,
 ) {
 	// Use a background context since the request context is cancelled when the
@@ -399,9 +430,17 @@ func (h *WSHandler) handleMessage(
 			"error", err,
 		)
 
-		h.sendMessageError(client, err)
+		h.sendMessageError(client, clientMessageID, err)
 		return
 	}
+
+	h.writeAccepted(client, outgoingAccepted{
+		Type:            "message.accepted",
+		ClientMessageID: clientMessageID,
+		MessageID:       msg.ID.Hex(),
+		ThreadID:        msg.ThreadID.Hex(),
+		SentAt:          msg.SentAt.Format(time.RFC3339),
+	})
 
 	outgoing := outgoingMessage{
 		Type:     "message",
@@ -542,17 +581,34 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 
 		var incoming incomingMessage
 		if err := json.Unmarshal(raw, &incoming); err != nil {
-			h.writeClientError(client, "invalid_message", "Invalid message format.")
+			h.writeClientError(client, "", "invalid_message", "Invalid message format.")
 			continue
 		}
 		if incoming.Content == "" {
+			h.writeClientError(
+				client,
+				incoming.ClientMessageID,
+				"empty_message",
+				"Message content cannot be empty.",
+			)
 			continue
 		}
 		if err := messagecontent.Validate(incoming.Content); err != nil {
-			h.writeClientError(client, "invalid_emoji", "Unsupported Yövmiye emoji.")
+			h.writeClientError(
+				client,
+				incoming.ClientMessageID,
+				"invalid_emoji",
+				"Unsupported Yövmiye emoji.",
+			)
 			continue
 		}
-		h.handleDirectMessage(client, sender, targetID, incoming.Content)
+		h.handleDirectMessage(
+			client,
+			sender,
+			targetID,
+			incoming.ClientMessageID,
+			incoming.Content,
+		)
 	}
 }
 
@@ -632,6 +688,7 @@ func (h *WSHandler) handleDirectMessage(
 	client *hub.Client,
 	sender dto.Sender,
 	targetID string,
+	clientMessageID string,
 	content string,
 ) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -646,17 +703,18 @@ func (h *WSHandler) handleDirectMessage(
 	if err != nil {
 		slog.ErrorContext(ctx, "ws: send direct message failed",
 			"sender_id", sender.ID, "target_id", targetID, "error", err)
-		if errors.Is(err, conversation.ErrDirectMessagesDisabled) {
-			h.writeClientError(
-				client,
-				"direct_messages_disabled",
-				"This user does not allow social direct messages.",
-			)
-		} else {
-			h.writeClientError(client, "send_failed", "Message could not be sent.")
-		}
+		code, message := directMessageError(err)
+		h.writeClientError(client, clientMessageID, code, message)
 		return
 	}
+
+	h.writeAccepted(client, outgoingAccepted{
+		Type:            "message.accepted",
+		ClientMessageID: clientMessageID,
+		MessageID:       msg.ID.Hex(),
+		ConversationID:  msg.ConversationID.Hex(),
+		SentAt:          msg.SentAt.Format(time.RFC3339),
+	})
 
 	outgoing := outgoingDirectMessage{
 		Type:           "message",
@@ -693,8 +751,18 @@ func (h *WSHandler) handleDirectMessage(
 	}
 }
 
-func (h *WSHandler) writeClientError(client *hub.Client, code, message string) {
-	payload, err := json.Marshal(outgoingError{Type: "error", Code: code, Message: message})
+func (h *WSHandler) writeClientError(
+	client *hub.Client,
+	clientMessageID string,
+	code string,
+	message string,
+) {
+	payload, err := json.Marshal(outgoingError{
+		Type:            "error",
+		ClientMessageID: clientMessageID,
+		Code:            code,
+		Message:         message,
+	})
 	if err != nil {
 		return
 	}
@@ -703,30 +771,70 @@ func (h *WSHandler) writeClientError(client *hub.Client, code, message string) {
 	}
 }
 
-func (h *WSHandler) sendMessageError(client *hub.Client, err error) {
-	code, message := "send_failed", "Message could not be sent."
-
-	switch {
-	case errors.Is(err, application.ErrApplicationPending):
-		code, message = "application_pending", "Waiting for the recipient to approve your application."
-	case errors.Is(err, application.ErrApplicationMustBeApproved):
-		code, message = "application_must_be_approved", "Approve the application before sending messages."
-	case errors.Is(err, application.ErrApplicationRejected):
-		code, message = "application_rejected", "This application was rejected."
-	case errors.Is(err, application.ErrApplicationArchived):
-		code, message = "application_archived", "This application was archived."
-	case errors.Is(err, application.ErrForbidden):
-		code, message = "forbidden", "You cannot send a message in this thread."
+func (h *WSHandler) writeAccepted(client *hub.Client, accepted outgoingAccepted) {
+	payload, err := json.Marshal(accepted)
+	if err != nil {
+		return
 	}
+	if err := client.Send(payload); err != nil {
+		h.hub.Unregister(client)
+	}
+}
+
+func (h *WSHandler) sendMessageError(
+	client *hub.Client,
+	clientMessageID string,
+	err error,
+) {
+	code, message := applicationMessageError(err)
 
 	payload, marshalErr := json.Marshal(outgoingError{
-		Type: "error", Code: code, Message: message,
+		Type:            "error",
+		ClientMessageID: clientMessageID,
+		Code:            code,
+		Message:         message,
 	})
 	if marshalErr != nil {
 		return
 	}
 	if writeErr := client.Send(payload); writeErr != nil {
 		h.hub.Unregister(client)
+	}
+}
+
+func applicationMessageError(err error) (string, string) {
+	switch {
+	case errors.Is(err, application.ErrApplicationPending):
+		return "application_pending", "Waiting for the recipient to approve your application."
+	case errors.Is(err, application.ErrApplicationMustBeApproved):
+		return "application_must_be_approved", "Approve the application before sending messages."
+	case errors.Is(err, application.ErrApplicationRejected):
+		return "application_rejected", "This application was rejected."
+	case errors.Is(err, application.ErrApplicationArchived):
+		return "application_archived", "This application was archived."
+	case errors.Is(err, application.ErrForbidden):
+		return "forbidden", "You cannot send a message in this thread."
+	case errors.Is(err, application.ErrInvalidApplicationStatus):
+		return "invalid_application_status", "This application cannot accept messages."
+	case errors.Is(err, application.ErrApplicationNotFound):
+		return "application_not_found", "Application conversation not found."
+	default:
+		return "send_failed", "Message could not be sent. Please try again."
+	}
+}
+
+func directMessageError(err error) (string, string) {
+	switch {
+	case errors.Is(err, conversation.ErrDirectMessagesDisabled):
+		return "direct_messages_disabled", "This user does not allow social direct messages."
+	case errors.Is(err, conversation.ErrForbidden):
+		return "forbidden", "You cannot send a message in this conversation."
+	case errors.Is(err, conversation.ErrNotFound):
+		return "conversation_not_found", "Conversation not found."
+	case errors.Is(err, conversation.ErrInvalidDirectConversation):
+		return "invalid_conversation", "This is not a valid direct conversation."
+	default:
+		return "send_failed", "Message could not be sent. Please try again."
 	}
 }
 
