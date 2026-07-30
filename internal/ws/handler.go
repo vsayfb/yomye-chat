@@ -14,6 +14,7 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/hub"
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
+	"github.com/vsayfb/gig-platform-chat-service/internal/messagecontent"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/dto"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/grpcclient"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/httputil"
@@ -230,6 +231,10 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		if incoming.Content == "" {
 			continue
 		}
+		if err := messagecontent.Validate(incoming.Content); err != nil {
+			h.writeClientError(client, "invalid_emoji", "Unsupported Yövmiye emoji.")
+			continue
+		}
 
 		h.handleMessage(client, *sender, *receiver, *gig, incoming.Content)
 	}
@@ -440,7 +445,7 @@ func (h *WSHandler) handleMessage(
 			ThreadID:       outgoing.ThreadID,
 			GigID:          gig.ID,
 			MessageID:      msg.ID.String(),
-			MessagePreview: truncateForNotification(content, 30),
+			MessagePreview: notificationPreview(content, 30),
 			OccurredAt:     time.Now(),
 		}}
 
@@ -543,6 +548,10 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 		if incoming.Content == "" {
 			continue
 		}
+		if err := messagecontent.Validate(incoming.Content); err != nil {
+			h.writeClientError(client, "invalid_emoji", "Unsupported Yövmiye emoji.")
+			continue
+		}
 		h.handleDirectMessage(client, sender, targetID, incoming.Content)
 	}
 }
@@ -571,8 +580,24 @@ func (h *WSHandler) resolveDirectTarget(
 	if targetID == senderID {
 		return "", &resolveError{status: http.StatusConflict, msg: "cannot connect to yourself"}
 	}
-	if _, err := h.userClient.GetUser(ctx, targetID); err != nil {
+
+	exists, err := h.conversationSvc.DirectConversationExists(ctx, senderID, targetID)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		return targetID, nil
+	}
+
+	allowed, err := h.userClient.AllowsSocialDirectMessages(ctx, targetID)
+	if err != nil {
 		return "", internalError("internal server error", err)
+	}
+	if !allowed {
+		return "", &resolveError{
+			status: http.StatusForbidden,
+			msg:    "user does not allow social direct messages",
+		}
 	}
 	return targetID, nil
 }
@@ -593,6 +618,8 @@ func (h *WSHandler) writeDirectResolveError(
 		httputil.WriteError(w, http.StatusNotFound, "conversation not found")
 	case errors.Is(err, conversation.ErrForbidden):
 		httputil.WriteError(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, conversation.ErrDirectMessagesDisabled):
+		httputil.WriteError(w, http.StatusForbidden, "user does not allow social direct messages")
 	case errors.Is(err, conversation.ErrInvalidDirectConversation):
 		httputil.WriteError(w, http.StatusConflict, "not a direct conversation")
 	default:
@@ -619,7 +646,15 @@ func (h *WSHandler) handleDirectMessage(
 	if err != nil {
 		slog.ErrorContext(ctx, "ws: send direct message failed",
 			"sender_id", sender.ID, "target_id", targetID, "error", err)
-		h.writeClientError(client, "send_failed", "Message could not be sent.")
+		if errors.Is(err, conversation.ErrDirectMessagesDisabled) {
+			h.writeClientError(
+				client,
+				"direct_messages_disabled",
+				"This user does not allow social direct messages.",
+			)
+		} else {
+			h.writeClientError(client, "send_failed", "Message could not be sent.")
+		}
 		return
 	}
 
@@ -648,7 +683,7 @@ func (h *WSHandler) handleDirectMessage(
 			SenderName:     sender.Name,
 			ThreadID:       outgoing.ConversationID,
 			MessageID:      msg.ID.Hex(),
-			MessagePreview: truncateForNotification(content, 30),
+			MessagePreview: notificationPreview(content, 30),
 			OccurredAt:     time.Now().UTC(),
 		},
 	}
@@ -707,4 +742,8 @@ func truncateForNotification(content string, maxLength int) string {
 	}
 
 	return string(runes[:maxLength-3]) + "..."
+}
+
+func notificationPreview(content string, maxLength int) string {
+	return truncateForNotification(messagecontent.NotificationText(content), maxLength)
 }

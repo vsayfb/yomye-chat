@@ -16,7 +16,12 @@ var (
 	ErrNotFound                  = errors.New("conversation not found")
 	ErrForbidden                 = errors.New("conversation access forbidden")
 	ErrInvalidDirectConversation = errors.New("invalid direct conversation")
+	ErrDirectMessagesDisabled    = errors.New("user does not allow social direct messages")
 )
+
+type CreationPolicy interface {
+	AllowsSocialDirectMessages(ctx context.Context, targetID string) (bool, error)
+}
 
 type Service interface {
 	List(ctx context.Context, userID string) ([]Summary, error)
@@ -28,6 +33,7 @@ type Service interface {
 		limit int,
 		before *time.Time,
 	) ([]Message, error)
+	DirectConversationExists(ctx context.Context, userA, userB string) (bool, error)
 	SendDirectMessage(
 		ctx context.Context,
 		senderID string,
@@ -37,11 +43,12 @@ type Service interface {
 }
 
 type service struct {
-	repo Repository
+	repo   Repository
+	policy CreationPolicy
 }
 
-func NewService(repo Repository) Service {
-	return &service{repo: repo}
+func NewService(repo Repository, policy CreationPolicy) Service {
+	return &service{repo: repo, policy: policy}
 }
 
 func (s *service) List(ctx context.Context, userID string) ([]Summary, error) {
@@ -94,6 +101,26 @@ func (s *service) ListMessages(
 	return s.repo.ListMessages(ctx, id, limit, before)
 }
 
+func (s *service) DirectConversationExists(
+	ctx context.Context,
+	userA string,
+	userB string,
+) (bool, error) {
+	conversation, err := s.repo.FindDirectByKey(ctx, directKey(userA, userB))
+	if err != nil {
+		return false, err
+	}
+	if conversation == nil {
+		return false, nil
+	}
+	if conversation.Type != TypeDirect ||
+		!isActiveMember(conversation, userA) ||
+		!isActiveMember(conversation, userB) {
+		return false, ErrForbidden
+	}
+	return true, nil
+}
+
 func (s *service) SendDirectMessage(
 	ctx context.Context,
 	senderID string,
@@ -112,6 +139,14 @@ func (s *service) SendDirectMessage(
 
 	isNew := false
 	if conversation == nil {
+		allowed, err := s.policy.AllowsSocialDirectMessages(ctx, targetID)
+		if err != nil {
+			return nil, false, err
+		}
+		if !allowed {
+			return nil, false, ErrDirectMessagesDisabled
+		}
+
 		now := time.Now().UTC()
 		conversation = &Conversation{
 			Type:      TypeDirect,

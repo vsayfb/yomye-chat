@@ -6,6 +6,7 @@ import (
 
 	pb "github.com/vsayfb/gig-platform-protos/contracts"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 type UserClient struct {
@@ -30,6 +31,61 @@ func (c *UserClient) GetUser(ctx context.Context, userID string) (*pb.GetUserRes
 	}
 
 	return resp, nil
+}
+
+func (c *UserClient) AllowsSocialDirectMessages(
+	ctx context.Context,
+	userID string,
+) (bool, error) {
+	resp, err := c.GetUser(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	if resp.GetUser() == nil {
+		return false, fmt.Errorf("grpc GetUser: empty user")
+	}
+	return allowsSocialDirectMessages(resp.GetUser())
+}
+
+// allowsSocialDirectMessages reads field 4 from the protobuf wire data. The
+// stable generated client predates that additive field, but protobuf preserves
+// it as unknown data. This can be replaced with the generated getter once the
+// renamed contracts module is regenerated with one consistent Go package.
+func allowsSocialDirectMessages(user *pb.User) (bool, error) {
+	data := user.ProtoReflect().GetUnknown()
+	for len(data) > 0 {
+		number, wireType, tagLength := protowire.ConsumeTag(data)
+		if tagLength < 0 {
+			return false, fmt.Errorf("decode user preference tag: %v", protowire.ParseError(tagLength))
+		}
+		data = data[tagLength:]
+
+		if number == 4 {
+			if wireType != protowire.VarintType {
+				return false, fmt.Errorf("decode user preference: unexpected wire type %v", wireType)
+			}
+			value, valueLength := protowire.ConsumeVarint(data)
+			if valueLength < 0 {
+				return false, fmt.Errorf(
+					"decode user preference value: %v",
+					protowire.ParseError(valueLength),
+				)
+			}
+			return value != 0, nil
+		}
+
+		fieldLength := protowire.ConsumeFieldValue(number, wireType, data)
+		if fieldLength < 0 {
+			return false, fmt.Errorf(
+				"decode user preference field: %v",
+				protowire.ParseError(fieldLength),
+			)
+		}
+		data = data[fieldLength:]
+	}
+
+	// Missing field follows protobuf's bool default and fails closed.
+	return false, nil
 }
 
 func (c *UserClient) GetUsers(ctx context.Context, userIDs []string) (*pb.GetUsersResponse, error) {

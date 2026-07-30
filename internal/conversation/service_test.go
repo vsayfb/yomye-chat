@@ -12,7 +12,8 @@ func TestSendDirectMessageCreatesAndReusesConversation(t *testing.T) {
 	t.Parallel()
 
 	repo := newFakeRepository()
-	service := NewService(repo)
+	policy := &fakeCreationPolicy{allowed: true}
+	service := NewService(repo, policy)
 	ctx := context.Background()
 
 	first, created, err := service.SendDirectMessage(ctx, "user-b", "user-a", "hello")
@@ -39,6 +40,30 @@ func TestSendDirectMessageCreatesAndReusesConversation(t *testing.T) {
 	if len(repo.messages) != 2 {
 		t.Fatalf("message count = %d, want 2", len(repo.messages))
 	}
+	if policy.calls != 1 {
+		t.Fatalf("creation policy calls = %d, want 1", policy.calls)
+	}
+}
+
+func TestSendDirectMessageRejectsOptedOutTargetBeforeCreation(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	policy := &fakeCreationPolicy{allowed: false}
+	service := NewService(repo, policy)
+
+	_, _, err := service.SendDirectMessage(
+		context.Background(),
+		"user-a",
+		"user-b",
+		"hello",
+	)
+	if err != ErrDirectMessagesDisabled {
+		t.Fatalf("SendDirectMessage() error = %v, want ErrDirectMessagesDisabled", err)
+	}
+	if len(repo.conversations) != 0 || len(repo.messages) != 0 {
+		t.Fatal("opted-out target caused content to be persisted")
+	}
 }
 
 func TestGetRequiresActiveMembership(t *testing.T) {
@@ -55,10 +80,25 @@ func TestGetRequiresActiveMembership(t *testing.T) {
 	}
 	repo.conversations[item.ID] = item
 
-	_, err := NewService(repo).Get(context.Background(), item.ID, "outsider")
+	_, err := NewService(repo, &fakeCreationPolicy{allowed: true}).
+		Get(context.Background(), item.ID, "outsider")
 	if err != ErrForbidden {
 		t.Fatalf("Get() error = %v, want ErrForbidden", err)
 	}
+}
+
+type fakeCreationPolicy struct {
+	allowed bool
+	err     error
+	calls   int
+}
+
+func (p *fakeCreationPolicy) AllowsSocialDirectMessages(
+	context.Context,
+	string,
+) (bool, error) {
+	p.calls++
+	return p.allowed, p.err
 }
 
 func TestOtherDirectMember(t *testing.T) {

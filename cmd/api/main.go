@@ -161,7 +161,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	conversationSvc := conversation.NewService(conversationRepo)
+	conversationSvc := conversation.NewService(conversationRepo, userClient)
 	conversationHandler := conversation.NewHandler(conversationSvc)
 
 	h := hub.New()
