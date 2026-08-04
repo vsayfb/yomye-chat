@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 )
 
 type Config struct {
@@ -20,15 +21,28 @@ type Config struct {
 	MetricsServerPort   string
 	OTelCollectorAddr   string
 
+	R2 R2Config
+
 	AWS AWSConfig
 }
 
 type AWSConfig struct {
-	Region              string
-	AccessKeyID         string
-	SecretAccessKey     string
-	SQSEndpoint         string
+	Region                  string
+	AccessKeyID             string
+	SecretAccessKey         string
+	SQSEndpoint             string
 	SQSNotificationQueueURL string
+	SQSChatQueueURL         string
+}
+
+type R2Config struct {
+	AccountID         string
+	AccessKeyID       string
+	SecretAccessKey   string
+	Bucket            string
+	ObjectPrefix      string
+	UploadURLExpiry   time.Duration
+	DownloadURLExpiry time.Duration
 }
 
 func Load(ctx context.Context) (*Config, error) {

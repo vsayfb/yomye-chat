@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -39,6 +40,7 @@ type Service interface {
 		senderID string,
 		targetID string,
 		content string,
+		attachments []attachment.Ref,
 	) (*Message, bool, error)
 }
 
@@ -126,6 +128,7 @@ func (s *service) SendDirectMessage(
 	senderID string,
 	targetID string,
 	content string,
+	attachments []attachment.Ref,
 ) (*Message, bool, error) {
 	if senderID == "" || targetID == "" || senderID == targetID {
 		return nil, false, ErrInvalidDirectConversation
@@ -187,6 +190,7 @@ func (s *service) SendDirectMessage(
 		ConversationID: conversation.ID,
 		SenderID:       senderID,
 		Content:        content,
+		Attachments:    attachments,
 		SentAt:         time.Now().UTC(),
 	}
 	if err := s.repo.CreateMessage(ctx, msg); err != nil {

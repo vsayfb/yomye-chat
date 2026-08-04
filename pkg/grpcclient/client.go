@@ -37,14 +37,14 @@ func (c *UserClient) AllowsSocialDirectMessages(
 	ctx context.Context,
 	userID string,
 ) (bool, error) {
-	resp, err := c.GetUser(ctx, userID)
+	resp, err := c.GetUsers(ctx, []string{userID})
 	if err != nil {
 		return false, err
 	}
-	if resp.GetUser() == nil {
-		return false, fmt.Errorf("grpc GetUser: empty user")
+	if len(resp.GetUsers()) != 1 || resp.GetUsers()[0].GetId() != userID {
+		return false, fmt.Errorf("grpc GetUsers: target user missing or mismatched")
 	}
-	return allowsSocialDirectMessages(resp.GetUser())
+	return allowsSocialDirectMessages(resp.GetUsers()[0])
 }
 
 // allowsSocialDirectMessages reads field 4 from the protobuf wire data. The

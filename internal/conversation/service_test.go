@@ -16,7 +16,7 @@ func TestSendDirectMessageCreatesAndReusesConversation(t *testing.T) {
 	service := NewService(repo, policy)
 	ctx := context.Background()
 
-	first, created, err := service.SendDirectMessage(ctx, "user-b", "user-a", "hello")
+	first, created, err := service.SendDirectMessage(ctx, "user-b", "user-a", "hello", nil)
 	if err != nil {
 		t.Fatalf("first SendDirectMessage() error = %v", err)
 	}
@@ -24,7 +24,7 @@ func TestSendDirectMessageCreatesAndReusesConversation(t *testing.T) {
 		t.Fatal("first SendDirectMessage() did not create a conversation")
 	}
 
-	second, created, err := service.SendDirectMessage(ctx, "user-a", "user-b", "hi")
+	second, created, err := service.SendDirectMessage(ctx, "user-a", "user-b", "hi", nil)
 	if err != nil {
 		t.Fatalf("second SendDirectMessage() error = %v", err)
 	}
@@ -57,6 +57,7 @@ func TestSendDirectMessageRejectsOptedOutTargetBeforeCreation(t *testing.T) {
 		"user-a",
 		"user-b",
 		"hello",
+		nil,
 	)
 	if err != ErrDirectMessagesDisabled {
 		t.Fatalf("SendDirectMessage() error = %v, want ErrDirectMessagesDisabled", err)

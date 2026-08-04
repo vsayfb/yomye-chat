@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -50,6 +51,7 @@ type Service interface {
 		targetID string,
 		gigID string,
 		content string,
+		attachments []attachment.Ref,
 	) (msg *Message, isNewThread bool, err error)
 }
 
@@ -238,6 +240,7 @@ func (s *applicationService) SendMessage(
 	targetID string,
 	gigID string,
 	content string,
+	attachments []attachment.Ref,
 ) (*Message, bool, error) {
 
 	app, err := s.repo.FindApplicationByParticipants(
@@ -267,12 +270,12 @@ func (s *applicationService) SendMessage(
 
 		if err := s.repo.CreateApplication(ctx, app); err != nil {
 			if mongo.IsDuplicateKeyError(err) {
-				return s.SendMessage(ctx, senderID, targetID, gigID, content)
+				return s.SendMessage(ctx, senderID, targetID, gigID, content, attachments)
 			}
 			return nil, false, err
 		}
 
-		msg, err := s.persistMessage(ctx, app.ID, senderID, content)
+		msg, err := s.persistMessage(ctx, app.ID, senderID, content, attachments)
 		if err != nil {
 			if cleanupErr := s.repo.DeleteApplication(ctx, app.ID); cleanupErr != nil {
 				slog.ErrorContext(ctx, "failed to clean up incomplete application",
@@ -301,7 +304,7 @@ func (s *applicationService) SendMessage(
 		return nil, false, ErrApplicationMustBeApproved
 
 	case ApplicationStatusAccepted:
-		msg, err := s.persistMessage(ctx, app.ID, senderID, content)
+		msg, err := s.persistMessage(ctx, app.ID, senderID, content, attachments)
 
 		return msg, false, err
 
@@ -321,16 +324,18 @@ func (s *applicationService) persistMessage(
 	threadID bson.ObjectID,
 	senderID string,
 	content string,
+	attachments []attachment.Ref,
 ) (*Message, error) {
 
 	now := time.Now().UTC()
 
 	msg := &Message{
-		ThreadID: threadID,
-		SenderID: senderID,
-		Content:  content,
-		IsRead:   false,
-		SentAt:   now,
+		ThreadID:    threadID,
+		SenderID:    senderID,
+		Content:     content,
+		Attachments: attachments,
+		IsRead:      false,
+		SentAt:      now,
 	}
 
 	if err := s.repo.CreateMessage(ctx, msg); err != nil {

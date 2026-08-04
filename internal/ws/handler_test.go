@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
+	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
 )
 
@@ -99,6 +100,30 @@ func TestAcceptedPayloadCorrelatesClientMessage(t *testing.T) {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("accepted payload %s does not contain %s", text, expected)
 		}
+	}
+}
+
+func TestParseAttachmentIDs(t *testing.T) {
+	t.Parallel()
+
+	first := "64b64c8e4f1a2b3c4d5e6f70"
+	second := "64b64c8e4f1a2b3c4d5e6f71"
+	ids, err := parseAttachmentIDs([]string{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0].Hex() != first || ids[1].Hex() != second {
+		t.Fatalf("parseAttachmentIDs() = %v", ids)
+	}
+
+	if _, err := parseAttachmentIDs([]string{first, first}); !errors.Is(err, attachment.ErrDuplicate) {
+		t.Fatalf("duplicate error = %v, want ErrDuplicate", err)
+	}
+	if _, err := parseAttachmentIDs([]string{first, second, first}); !errors.Is(err, attachment.ErrTooMany) {
+		t.Fatalf("limit error = %v, want ErrTooMany", err)
+	}
+	if _, err := parseAttachmentIDs([]string{"not-an-id"}); !errors.Is(err, attachment.ErrInvalidInput) {
+		t.Fatalf("invalid ID error = %v, want ErrInvalidInput", err)
 	}
 }
 

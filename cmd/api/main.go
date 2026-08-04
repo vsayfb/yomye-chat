@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"log/slog"
 	"net/http"
@@ -14,10 +15,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/vsayfb/gig-platform-chat-service/config"
 	"github.com/vsayfb/gig-platform-chat-service/hub"
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
+	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
 	"github.com/vsayfb/gig-platform-chat-service/internal/ws"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/awsclient"
@@ -27,6 +30,7 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/pkg/logger"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/metrics"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/middleware"
+	"github.com/vsayfb/gig-platform-chat-service/pkg/objectstorage/r2"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/sqs"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/telemetry"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/tracing"
@@ -114,6 +118,30 @@ func initTelemetryWithRetry(
 	}
 }
 
+func runAttachmentCleanup(ctx context.Context, service *attachment.Service) {
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		for {
+			processed, err := service.CleanupOne(ctx)
+			if err != nil {
+				slog.ErrorContext(ctx, "attachment cleanup failed", "error", err)
+				break
+			}
+			if !processed {
+				break
+			}
+		}
+
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -164,6 +192,57 @@ func main() {
 	conversationSvc := conversation.NewService(conversationRepo, userClient)
 	conversationHandler := conversation.NewHandler(conversationSvc)
 
+	r2Client, err := r2.New(ctx, r2.Config{
+		AccountID: cfg.R2.AccountID, AccessKeyID: cfg.R2.AccessKeyID,
+		SecretAccessKey: cfg.R2.SecretAccessKey, Bucket: cfg.R2.Bucket,
+		ObjectPrefix:      cfg.R2.ObjectPrefix,
+		UploadURLExpiry:   cfg.R2.UploadURLExpiry,
+		DownloadURLExpiry: cfg.R2.DownloadURLExpiry,
+	})
+	if err != nil {
+		slog.Error("failed to initialize R2 client", "err", err)
+		os.Exit(1)
+	}
+
+	attachmentRepo := attachment.NewRepository(db)
+	if err := attachmentRepo.EnsureIndexes(ctx); err != nil {
+		slog.Error("failed to ensure attachment indexes", "err", err)
+		os.Exit(1)
+	}
+	authorizeAttachment := func(
+		ctx context.Context,
+		scope attachment.Scope,
+		scopeID bson.ObjectID,
+		userID string,
+	) error {
+		switch scope {
+		case attachment.ScopeDirect:
+			_, err := conversationSvc.Get(ctx, scopeID, userID)
+			if errors.Is(err, conversation.ErrForbidden) {
+				return attachment.ErrForbidden
+			}
+			if errors.Is(err, conversation.ErrNotFound) {
+				return attachment.ErrNotFound
+			}
+			return err
+		case attachment.ScopeApplication:
+			_, err := applicationSvc.GetApplication(ctx, scopeID, userID)
+			if errors.Is(err, application.ErrForbidden) {
+				return attachment.ErrForbidden
+			}
+			if errors.Is(err, application.ErrApplicationNotFound) {
+				return attachment.ErrNotFound
+			}
+			return err
+		default:
+			return attachment.ErrInvalidInput
+		}
+	}
+	attachmentSvc := attachment.NewService(
+		attachmentRepo, r2Client, mongoClient, authorizeAttachment,
+	)
+	attachmentHandler := attachment.NewHandler(attachmentSvc)
+
 	h := hub.New()
 
 	jwtSvc := jwt.New(cfg.JWTSecret)
@@ -187,6 +266,7 @@ func main() {
 		jwtSvc,
 		applicationSvc,
 		conversationSvc,
+		attachmentSvc,
 		sqsPublisher,
 		userClient,
 		gigClient,
@@ -256,6 +336,10 @@ func main() {
 		r.With(authMiddleware).Get("/{threadID}/messages", applicationHandler.ListMessages)
 		r.With(authMiddleware).Post("/{threadID}/approve", applicationHandler.ApproveApplication)
 		r.With(authMiddleware).Post("/{threadID}/reject", applicationHandler.RejectApplication)
+		r.With(authMiddleware).Post(
+			"/{threadID}/attachments/uploads",
+			attachmentHandler.AuthorizeApplicationUpload,
+		)
 	})
 
 	r.Route("/conversations", func(r chi.Router) {
@@ -263,7 +347,21 @@ func main() {
 		r.Get("/me", conversationHandler.List)
 		r.Get("/{conversationID}", conversationHandler.Get)
 		r.Get("/{conversationID}/messages", conversationHandler.ListMessages)
+		r.Post(
+			"/{conversationID}/attachments/uploads",
+			attachmentHandler.AuthorizeDirectUpload,
+		)
 	})
+
+	r.Route("/attachments", func(r chi.Router) {
+		r.Use(authMiddleware)
+		r.Post("/{attachmentID}/confirm", attachmentHandler.Confirm)
+		r.Get("/{attachmentID}/download", attachmentHandler.Download)
+	})
+
+	cleanupCtx, cleanupCancel := context.WithCancel(ctx)
+	defer cleanupCancel()
+	go runAttachmentCleanup(cleanupCtx, attachmentSvc)
 
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscfg "github.com/aws/aws-sdk-go-v2/config"
@@ -18,6 +19,10 @@ const (
 	ParameterMongoDBName                   = "mongo-db-name"
 	ParameterSQSNotificationEventsQueueURL = "sqs-notification-events-queue-url"
 	ParameterJWTSecret                     = "jwt-secret"
+	SSMParameterR2AccountID                = "r2-account-id"
+	SSMParameterR2AccessKeyID              = "r2-access-key-id"
+	SSMParameterR2SecretAccessKey          = "r2-secret-access-key"
+	SSMParameterR2Bucket                   = "r2-bucket"
 )
 
 func loadAWS(ctx context.Context) (*Config, error) {
@@ -65,6 +70,16 @@ func loadAWS(ctx context.Context) (*Config, error) {
 			SQSNotificationQueueURL: params[ParameterSQSNotificationEventsQueueURL],
 		},
 
+		R2: R2Config{
+			AccountID:         params[SSMParameterR2AccountID],
+			AccessKeyID:       params[SSMParameterR2AccessKeyID],
+			SecretAccessKey:   params[SSMParameterR2SecretAccessKey],
+			Bucket:            params[SSMParameterR2Bucket],
+			ObjectPrefix:      DefaultR2ObjectPrefix,
+			UploadURLExpiry:   mustParseDuration(DefaultR2UploadURLExpiry),
+			DownloadURLExpiry: mustParseDuration(DefaultR2DownloadURLExpiry),
+		},
+
 		UserServiceGRPCAddr: getEnv(
 			EnvUserServiceGRPCAddr,
 			DefaultUserServiceGRPCAddr,
@@ -86,6 +101,10 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 		parameter(ParameterMongoURISecret),
 		parameter(ParameterMongoDBName),
 		parameter(ParameterSQSNotificationEventsQueueURL),
+		parameter(SSMParameterR2AccountID),
+		parameter(SSMParameterR2AccessKeyID),
+		parameter(SSMParameterR2SecretAccessKey),
+		parameter(SSMParameterR2Bucket),
 	}
 
 	out, err := client.GetParameters(ctx, &ssm.GetParametersInput{
@@ -127,6 +146,10 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 		ParameterMongoURISecret,
 		ParameterMongoDBName,
 		ParameterSQSNotificationEventsQueueURL,
+		SSMParameterR2AccountID,
+		SSMParameterR2AccessKeyID,
+		SSMParameterR2SecretAccessKey,
+		SSMParameterR2Bucket,
 	}
 
 	for _, key := range required {
@@ -140,4 +163,12 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 
 func parameter(name string) string {
 	return ParameterPath + name
+}
+
+func mustParseDuration(s string) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		panic(fmt.Sprintf("invalid duration %q: %v", s, err))
+	}
+	return d
 }

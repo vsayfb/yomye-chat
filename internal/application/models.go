@@ -3,6 +3,7 @@ package application
 import (
 	"time"
 
+	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -49,7 +50,8 @@ type Message struct {
 	ThreadID bson.ObjectID `bson:"thread_id" json:"thread_id"`
 	SenderID string        `bson:"sender_id" json:"sender_id"`
 
-	Content string `bson:"content" json:"content"`
+	Content     string           `bson:"content" json:"content"`
+	Attachments []attachment.Ref `bson:"attachments,omitempty" json:"attachments,omitempty"`
 
 	IsRead bool `bson:"is_read" json:"is_read"`
 

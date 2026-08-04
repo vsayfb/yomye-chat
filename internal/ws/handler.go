@@ -13,6 +13,7 @@ import (
 
 	"github.com/vsayfb/gig-platform-chat-service/hub"
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
+	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
 	"github.com/vsayfb/gig-platform-chat-service/internal/messagecontent"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/dto"
@@ -41,25 +42,28 @@ const (
 
 // incomingMessage is what the client sends over WebSocket.
 type incomingMessage struct {
-	ClientMessageID string `json:"client_message_id,omitempty"`
-	Content         string `json:"content"`
+	ClientMessageID string   `json:"client_message_id,omitempty"`
+	Content         string   `json:"content"`
+	AttachmentIDs   []string `json:"attachment_ids,omitempty"`
 }
 
 // outgoingMessage is what we deliver to the recipient.
 type outgoingMessage struct {
-	Type     string `json:"type,omitempty"`
-	ThreadID string `json:"thread_id"`
-	SenderID string `json:"sender_id"`
-	Content  string `json:"content"`
-	SentAt   string `json:"sent_at"`
+	Type        string           `json:"type,omitempty"`
+	ThreadID    string           `json:"thread_id"`
+	SenderID    string           `json:"sender_id"`
+	Content     string           `json:"content"`
+	Attachments []attachment.Ref `json:"attachments,omitempty"`
+	SentAt      string           `json:"sent_at"`
 }
 
 type outgoingDirectMessage struct {
-	Type           string `json:"type"`
-	ConversationID string `json:"conversation_id"`
-	SenderID       string `json:"sender_id"`
-	Content        string `json:"content"`
-	SentAt         string `json:"sent_at"`
+	Type           string           `json:"type"`
+	ConversationID string           `json:"conversation_id"`
+	SenderID       string           `json:"sender_id"`
+	Content        string           `json:"content"`
+	Attachments    []attachment.Ref `json:"attachments,omitempty"`
+	SentAt         string           `json:"sent_at"`
 }
 
 type outgoingError struct {
@@ -83,6 +87,7 @@ type WSHandler struct {
 	jwtSvc          *jwt.Service
 	applicationSvc  application.Service
 	conversationSvc conversation.Service
+	attachmentSvc   *attachment.Service
 	userClient      *grpcclient.UserClient
 	gigClient       *grpcclient.GigClient
 	publisher       *mysqs.Publisher
@@ -93,6 +98,7 @@ func NewWSHandler(
 	jwtSvc *jwt.Service,
 	applicationSvc application.Service,
 	conversationSvc conversation.Service,
+	attachmentSvc *attachment.Service,
 	publisher *mysqs.Publisher,
 	userClient *grpcclient.UserClient,
 	gigClient *grpcclient.GigClient,
@@ -102,6 +108,7 @@ func NewWSHandler(
 		jwtSvc:          jwtSvc,
 		applicationSvc:  applicationSvc,
 		conversationSvc: conversationSvc,
+		attachmentSvc:   attachmentSvc,
 		publisher:       publisher,
 		userClient:      userClient,
 		gigClient:       gigClient,
@@ -174,10 +181,14 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	var (
 		receiver *dto.Receiver
 		gig      *dto.Gig
+		threadID bson.ObjectID
 	)
 
 	if threadIDParam := r.URL.Query().Get("threadID"); threadIDParam != "" {
 		receiver, gig, err = h.resolveByThread(ctx, threadIDParam, sender.ID)
+		if err == nil {
+			threadID, _ = bson.ObjectIDFromHex(threadIDParam)
+		}
 	} else {
 		receiver, gig, err = h.resolveByParticipants(ctx, r, sender.ID)
 	}
@@ -240,7 +251,15 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if incoming.Content == "" {
+		attachmentIDs, parseErr := parseAttachmentIDs(incoming.AttachmentIDs)
+		if parseErr != nil {
+			h.writeClientError(
+				client, incoming.ClientMessageID,
+				"invalid_attachments", "Invalid attachment selection.",
+			)
+			continue
+		}
+		if incoming.Content == "" && len(attachmentIDs) == 0 {
 			h.writeClientError(
 				client,
 				incoming.ClientMessageID,
@@ -264,8 +283,10 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 			*sender,
 			*receiver,
 			*gig,
+			threadID,
 			incoming.ClientMessageID,
 			incoming.Content,
+			attachmentIDs,
 		)
 	}
 }
@@ -404,20 +425,40 @@ func (h *WSHandler) handleMessage(
 	sender dto.Sender,
 	receiver dto.Receiver,
 	gig dto.Gig,
+	threadID bson.ObjectID,
 	clientMessageID string,
 	content string,
+	attachmentIDs []bson.ObjectID,
 ) {
 	// Use a background context since the request context is cancelled when the
 	// WebSocket disconnects, but persistence and notification should still complete.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	msg, isNewThread, err := h.applicationSvc.SendMessage(
-		ctx,
-		sender.ID,
-		receiver.ID,
-		gig.ID,
-		content,
+	if len(attachmentIDs) > 0 && threadID.IsZero() {
+		h.writeClientError(
+			client, clientMessageID, "attachments_require_thread",
+			"Reconnect using threadID before sending attachments.",
+		)
+		return
+	}
+
+	var (
+		msg         *application.Message
+		isNewThread bool
+	)
+	err := h.attachmentSvc.CommitMessage(
+		ctx, attachment.ScopeApplication, threadID, sender.ID, attachmentIDs,
+		func(txCtx context.Context, refs []attachment.Ref) (bson.ObjectID, error) {
+			var sendErr error
+			msg, isNewThread, sendErr = h.applicationSvc.SendMessage(
+				txCtx, sender.ID, receiver.ID, gig.ID, content, refs,
+			)
+			if sendErr != nil {
+				return bson.NilObjectID, sendErr
+			}
+			return msg.ID, nil
+		},
 	)
 
 	if err != nil {
@@ -430,7 +471,11 @@ func (h *WSHandler) handleMessage(
 			"error", err,
 		)
 
-		h.sendMessageError(client, clientMessageID, err)
+		if code, message, ok := attachmentMessageError(err); ok {
+			h.writeClientError(client, clientMessageID, code, message)
+		} else {
+			h.sendMessageError(client, clientMessageID, err)
+		}
 		return
 	}
 
@@ -443,11 +488,12 @@ func (h *WSHandler) handleMessage(
 	})
 
 	outgoing := outgoingMessage{
-		Type:     "message",
-		ThreadID: msg.ThreadID.Hex(),
-		SenderID: msg.SenderID,
-		Content:  msg.Content,
-		SentAt:   msg.SentAt.Format(time.RFC3339),
+		Type:        "message",
+		ThreadID:    msg.ThreadID.Hex(),
+		SenderID:    msg.SenderID,
+		Content:     msg.Content,
+		Attachments: msg.Attachments,
+		SentAt:      msg.SentAt.Format(time.RFC3339),
 	}
 
 	payload, err := json.Marshal(outgoing)
@@ -535,6 +581,10 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 		h.writeDirectResolveError(w, ctx, err)
 		return
 	}
+	var conversationID bson.ObjectID
+	if value := r.URL.Query().Get("conversationID"); value != "" {
+		conversationID, _ = bson.ObjectIDFromHex(value)
+	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -584,7 +634,15 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 			h.writeClientError(client, "", "invalid_message", "Invalid message format.")
 			continue
 		}
-		if incoming.Content == "" {
+		attachmentIDs, parseErr := parseAttachmentIDs(incoming.AttachmentIDs)
+		if parseErr != nil {
+			h.writeClientError(
+				client, incoming.ClientMessageID,
+				"invalid_attachments", "Invalid attachment selection.",
+			)
+			continue
+		}
+		if incoming.Content == "" && len(attachmentIDs) == 0 {
 			h.writeClientError(
 				client,
 				incoming.ClientMessageID,
@@ -606,8 +664,10 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 			client,
 			sender,
 			targetID,
+			conversationID,
 			incoming.ClientMessageID,
 			incoming.Content,
+			attachmentIDs,
 		)
 	}
 }
@@ -688,21 +748,43 @@ func (h *WSHandler) handleDirectMessage(
 	client *hub.Client,
 	sender dto.Sender,
 	targetID string,
+	conversationID bson.ObjectID,
 	clientMessageID string,
 	content string,
+	attachmentIDs []bson.ObjectID,
 ) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	msg, _, err := h.conversationSvc.SendDirectMessage(
-		ctx,
-		sender.ID,
-		targetID,
-		content,
+	if len(attachmentIDs) > 0 && conversationID.IsZero() {
+		h.writeClientError(
+			client, clientMessageID, "attachments_require_conversation",
+			"Reconnect using conversationID before sending attachments.",
+		)
+		return
+	}
+
+	var msg *conversation.Message
+	err := h.attachmentSvc.CommitMessage(
+		ctx, attachment.ScopeDirect, conversationID, sender.ID, attachmentIDs,
+		func(txCtx context.Context, refs []attachment.Ref) (bson.ObjectID, error) {
+			var sendErr error
+			msg, _, sendErr = h.conversationSvc.SendDirectMessage(
+				txCtx, sender.ID, targetID, content, refs,
+			)
+			if sendErr != nil {
+				return bson.NilObjectID, sendErr
+			}
+			return msg.ID, nil
+		},
 	)
 	if err != nil {
 		slog.ErrorContext(ctx, "ws: send direct message failed",
 			"sender_id", sender.ID, "target_id", targetID, "error", err)
+		if code, message, ok := attachmentMessageError(err); ok {
+			h.writeClientError(client, clientMessageID, code, message)
+			return
+		}
 		code, message := directMessageError(err)
 		h.writeClientError(client, clientMessageID, code, message)
 		return
@@ -721,6 +803,7 @@ func (h *WSHandler) handleDirectMessage(
 		ConversationID: msg.ConversationID.Hex(),
 		SenderID:       msg.SenderID,
 		Content:        msg.Content,
+		Attachments:    msg.Attachments,
 		SentAt:         msg.SentAt.Format(time.RFC3339),
 	}
 	payload, err := json.Marshal(outgoing)
@@ -838,6 +921,42 @@ func directMessageError(err error) (string, string) {
 	}
 }
 
+func attachmentMessageError(err error) (string, string, bool) {
+	switch {
+	case errors.Is(err, attachment.ErrTooMany):
+		return "too_many_attachments", "A message can include at most two attachments.", true
+	case errors.Is(err, attachment.ErrDuplicate):
+		return "duplicate_attachment", "The same attachment cannot be included twice.", true
+	case errors.Is(err, attachment.ErrInvalidState),
+		errors.Is(err, attachment.ErrExpired):
+		return "attachment_unavailable", "One or more attachments are no longer available.", true
+	case errors.Is(err, attachment.ErrForbidden):
+		return "attachment_forbidden", "You cannot use one or more attachments.", true
+	default:
+		return "", "", false
+	}
+}
+
+func parseAttachmentIDs(values []string) ([]bson.ObjectID, error) {
+	if len(values) > attachment.MaxPerMessage {
+		return nil, attachment.ErrTooMany
+	}
+	result := make([]bson.ObjectID, 0, len(values))
+	seen := make(map[bson.ObjectID]struct{}, len(values))
+	for _, value := range values {
+		id, err := bson.ObjectIDFromHex(value)
+		if err != nil || id.IsZero() {
+			return nil, attachment.ErrInvalidInput
+		}
+		if _, ok := seen[id]; ok {
+			return nil, attachment.ErrDuplicate
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result, nil
+}
+
 func truncateForNotification(content string, maxLength int) string {
 	runes := []rune(content)
 
@@ -853,5 +972,8 @@ func truncateForNotification(content string, maxLength int) string {
 }
 
 func notificationPreview(content string, maxLength int) string {
+	if content == "" {
+		return "[Ek]"
+	}
 	return truncateForNotification(messagecontent.NotificationText(content), maxLength)
 }
