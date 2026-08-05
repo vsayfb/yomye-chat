@@ -55,7 +55,7 @@ func loadAWS(ctx context.Context) (*Config, error) {
 
 	return &Config{
 		ServiceName: getEnv(EnvServiceName, DefaultServiceName),
-		AppEnv:      EnvironmentProduction,
+		AppEnv:      EnvironmentStaging,
 		Port:        getEnv(EnvServerPort, DefaultServerPort),
 
 		JWTSecret: params[ParameterJWTSecret],
