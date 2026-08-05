@@ -48,8 +48,12 @@ type R2Config struct {
 func Load(ctx context.Context) (*Config, error) {
 	env := getEnv(AppEnv, EnvironmentDevelopment)
 
-	if env == EnvironmentProduction {
+	if env == EnvironmentStaging {
 		return loadAWS(ctx)
+	}
+
+	if env == EnvironmentProduction {
+		return loadGCP(ctx)
 	}
 
 	return loadEnv()

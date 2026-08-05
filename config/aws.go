@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
-const ParameterPath = "/yevmiye/app/"
+const ParameterPath = "/yevmiye/staging/"
 
 const (
 	ParameterMongoURISecret                = "mongo-db-uri"

@@ -4,6 +4,7 @@ const AppEnv = "APP_ENV"
 
 const (
 	EnvironmentDevelopment = "development"
+	EnvironmentStaging     = "staging"
 	EnvironmentProduction  = "production"
 )
 

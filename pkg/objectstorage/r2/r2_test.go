@@ -45,7 +45,10 @@ func (s *presignStub) PresignPutObject(_ context.Context, input *s3.PutObjectInp
 	}
 	return &awsv4.PresignedHTTPRequest{
 		URL: "https://upload.test", Method: http.MethodPut,
-		SignedHeader: http.Header{"Content-Type": []string{"image/png"}},
+		SignedHeader: http.Header{
+			"Content-Type":  []string{"image/png"},
+			"If-None-Match": []string{"*"},
+		},
 	}, nil
 }
 
@@ -105,14 +108,16 @@ func TestPresignUploadBindsTypeWithoutRequiringContentLength(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Method != http.MethodPut ||
-		result.Headers["Content-Type"] != "image/png" {
+		result.Headers["Content-Type"] != "image/png" ||
+		result.Headers["If-None-Match"] != "*" {
 		t.Fatalf("unexpected authorization: %+v", result)
 	}
 	if _, ok := result.Headers["Content-Length"]; ok {
 		t.Fatalf("browser-controlled Content-Length must not be required: %+v", result)
 	}
 	if aws.ToString(presign.put.Bucket) != "private" ||
-		presign.put.ContentLength != nil {
+		presign.put.ContentLength != nil ||
+		aws.ToString(presign.put.IfNoneMatch) != "*" {
 		t.Fatalf("unexpected put request: %+v", presign.put)
 	}
 }

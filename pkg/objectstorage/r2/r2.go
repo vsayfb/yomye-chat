@@ -146,13 +146,17 @@ func (c *Client) PresignUpload(
 		Bucket:      aws.String(c.cfg.Bucket),
 		Key:         aws.String(request.Key),
 		ContentType: aws.String(contentType),
+		IfNoneMatch: aws.String("*"),
 	}, func(options *s3.PresignOptions) {
 		options.Expires = c.cfg.UploadURLExpiry
 	})
 	if err != nil {
 		return nil, fmt.Errorf("presign R2 upload: %w", err)
 	}
-	headers := map[string]string{"Content-Type": contentType}
+	headers := map[string]string{
+		"Content-Type":  contentType,
+		"If-None-Match": "*",
+	}
 	for name, values := range result.SignedHeader {
 		if !strings.EqualFold(name, "host") {
 			headers[name] = strings.Join(values, ",")
