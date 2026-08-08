@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
+	"github.com/vsayfb/gig-platform-chat-service/internal/messagecursor"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -32,7 +33,7 @@ type Service interface {
 		userID string,
 		id bson.ObjectID,
 		limit int,
-		before *time.Time,
+		cursor *messagecursor.Cursor,
 	) ([]Message, error)
 	DirectConversationExists(ctx context.Context, userA, userB string) (bool, error)
 	SendDirectMessage(
@@ -95,12 +96,12 @@ func (s *service) ListMessages(
 	userID string,
 	id bson.ObjectID,
 	limit int,
-	before *time.Time,
+	cursor *messagecursor.Cursor,
 ) ([]Message, error) {
 	if _, err := s.Get(ctx, id, userID); err != nil {
 		return nil, err
 	}
-	return s.repo.ListMessages(ctx, id, limit, before)
+	return s.repo.ListMessages(ctx, id, limit, cursor)
 }
 
 func (s *service) DirectConversationExists(

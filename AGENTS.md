@@ -295,18 +295,68 @@ Authenticated REST routes use bearer JWT middleware:
 
 - `GET /applications/me`
 - `GET /applications/{threadID}`
-- `GET /applications/{threadID}/messages?before=<RFC3339>&limit=<1..100>`
+- `GET /applications/{threadID}/messages?before=<RFC3339Nano>&before_id=<ObjectID>&limit=<1..100>`
 - `POST /applications/{threadID}/approve`
 - `POST /applications/{threadID}/reject`
 - `POST /applications/{threadID}/attachments/uploads`
 - `GET /conversations/me`
 - `GET /conversations/{conversationID}`
-- `GET /conversations/{conversationID}/messages?before=<RFC3339>&limit=<1..100>`
+- `GET /conversations/{conversationID}/messages?before=<RFC3339Nano>&before_id=<ObjectID>&limit=<1..100>`
 - `POST /conversations/{conversationID}/attachments/uploads`
 - `POST /attachments/{attachmentID}/confirm`
 - `GET /attachments/{attachmentID}/download`
 
 Application and social inbox/history endpoints remain separate.
+
+Message-history pagination is ordered by `(sent_at DESC, _id DESC)`. The first
+page omits both cursor parameters. Every subsequent page must provide both
+`before` and `before_id`, copied from the last message on the previous page. A
+timestamp-only cursor is intentionally rejected because messages can share the
+same MongoDB timestamp and would otherwise be skipped at page boundaries.
+
+## Production-readiness decisions
+
+The following decisions correspond to the August 2026 production-readiness
+review. Preserve these statuses unless the maintainer explicitly revisits them.
+
+- **JWT access-token discrimination — deferred.** Chat currently validates the
+  signed JWT and expiry but does not yet enforce an issuer/audience/token-type
+  claim that independently distinguishes Core access tokens from refresh
+  tokens. Do not invent a claim contract in Chat. Revisit this after confirming
+  Core's authoritative token claims.
+- **Durable notification outbox — accepted open decision.** Message persistence
+  remains authoritative and SQS notification publishing remains best effort
+  after the message is durable. An SQS failure must not make the client retry a
+  successfully stored message. This means an offline notification can be lost.
+  That reliability trade-off is accepted for now; revisit an outbox/durable
+  retry design before stronger production notification guarantees are required.
+- **Durable `client_message_id` idempotency — deferred.** The field remains a
+  correlation/acknowledgement identifier only. Database uniqueness and replay
+  handling will be designed later.
+- **WebSocket origin and query-string JWT transport — deferred.** The current
+  browser-origin policy and `?token=` transport remain unchanged until the
+  staging proxy/browser/native-client topology is known. Never log the query
+  string in the meantime.
+- **Mongo indexes — implemented.** Application inbox queries have separate
+  `(initiator_id, last_message_at DESC)` and `(target_id, last_message_at DESC)`
+  indexes. Application message history uses
+  `(thread_id, sent_at DESC, _id DESC)`. Direct message history uses
+  `(conversation_id, sent_at DESC, _id DESC)`. New names are used for changed
+  message index specs so existing deployments do not fail startup on an index
+  name/spec conflict.
+- **Stable message pagination — implemented.** History uses the composite
+  `(sent_at, _id)` cursor described in the HTTP API section. Both cursor values
+  are required together.
+- **Application approve/reject race — implemented.** Pending status transitions
+  are compare-and-set Mongo updates matching `_id`, `target_id`, and
+  `status=pending` atomically. A failed compare-and-set may be followed by a
+  read only to preserve the existing not-found/forbidden/conflict HTTP mapping;
+  authorization and state transition correctness must not depend on that read.
+- **Core gRPC deadlines — implemented.** Chat applies a 3-second timeout to
+  each Core `GetUser`, `GetUsers`, and `GetGig` RPC while preserving any earlier
+  caller deadline. `grpc.NewClient` remains lazy and is not treated as a Core
+  health check; request-time calls are bounded rather than allowed to hang on
+  transport/connectivity behavior.
 
 ## Configuration and deployment
 
@@ -360,14 +410,16 @@ Before treating the service as internet-production-ready, explicitly review:
 - WebSocket `CheckOrigin` currently allows all origins.
 - No visible per-user/IP rate limiting for socket connects, messages, upload
   authorizations, confirmations, or download authorizations.
-- No WebSocket read-size limit, ping/pong heartbeat, or idle deadlines.
 - The hub is in-memory and process-local.
 - Query-string JWT transport can leak through careless proxy/access logging.
 - Attachment content is not signature-validated or malware-scanned.
 - Production GCP configuration is unimplemented.
-- Notification delivery is best effort after durable message persistence.
-- `client_message_id` acknowledgements do not currently enforce durable
-  idempotency; client retries can create duplicates.
+- Notification delivery remains best effort by explicit open decision; see the
+  production-readiness decisions above before changing that contract.
+- `client_message_id` durable idempotency is explicitly deferred; client retries
+  can still create duplicates.
+- JWT access-token discrimination beyond signature/expiry is explicitly deferred
+  until Core's token claim contract is confirmed.
 
 Do not silently expand scope while fixing these. State the threat/trade-off,
 make the smallest safe change, preserve compatibility where possible, and add

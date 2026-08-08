@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/vsayfb/gig-platform-chat-service/internal/messagecursor"
+
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -39,11 +41,13 @@ type Repository interface {
 
 	DeleteApplication(ctx context.Context, threadID bson.ObjectID) error
 
-	UpdateApplicationStatus(
+	TransitionApplicationStatus(
 		ctx context.Context,
 		threadID bson.ObjectID,
-		status ApplicationStatus,
-	) error
+		targetID string,
+		from ApplicationStatus,
+		to ApplicationStatus,
+	) (bool, error)
 
 	UpdateLastMessage(
 		ctx context.Context,
@@ -63,7 +67,7 @@ type Repository interface {
 		ctx context.Context,
 		threadID bson.ObjectID,
 		limit int,
-		before *time.Time,
+		cursor *messagecursor.Cursor,
 	) ([]Message, error)
 }
 
@@ -85,14 +89,41 @@ func NewApplicationRepository(db *mongo.Database) Repository {
 }
 
 func (r *applicationRepository) EnsureIndexes(ctx context.Context) error {
-	_, err := r.applications.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{{Key: "conversation_key", Value: 1}},
-		Options: options.Index().
-			SetName("unique_conversation").
-			SetUnique(true).
-			SetPartialFilterExpression(bson.M{
-				"conversation_key": bson.M{"$type": "string"},
-			}),
+	if _, err := r.applications.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{{Key: "conversation_key", Value: 1}},
+			Options: options.Index().
+				SetName("unique_conversation").
+				SetUnique(true).
+				SetPartialFilterExpression(bson.M{
+					"conversation_key": bson.M{"$type": "string"},
+				}),
+		},
+		{
+			Keys: bson.D{
+				{Key: "initiator_id", Value: 1},
+				{Key: "last_message_at", Value: -1},
+			},
+			Options: options.Index().SetName("initiator_applications"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "target_id", Value: 1},
+				{Key: "last_message_at", Value: -1},
+			},
+			Options: options.Index().SetName("target_applications"),
+		},
+	}); err != nil {
+		return err
+	}
+
+	_, err := r.messages.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "thread_id", Value: 1},
+			{Key: "sent_at", Value: -1},
+			{Key: "_id", Value: -1},
+		},
+		Options: options.Index().SetName("application_messages_v2"),
 	})
 	return err
 }
@@ -183,24 +214,24 @@ func (r *applicationRepository) FindApplicationByID(
 	return &app, nil
 }
 
-func (r *applicationRepository) UpdateApplicationStatus(
+func (r *applicationRepository) TransitionApplicationStatus(
 	ctx context.Context,
 	threadID bson.ObjectID,
-	status ApplicationStatus,
-) error {
-
-	filter := bson.M{
-		"_id": threadID,
+	targetID string,
+	from ApplicationStatus,
+	to ApplicationStatus,
+) (bool, error) {
+	result, err := r.applications.UpdateOne(ctx, bson.M{
+		"_id":       threadID,
+		"target_id": targetID,
+		"status":    from,
+	}, bson.M{
+		"$set": bson.M{"status": to},
+	})
+	if err != nil {
+		return false, err
 	}
-
-	update := bson.M{
-		"$set": bson.M{
-			"status": status,
-		},
-	}
-
-	_, err := r.applications.UpdateOne(ctx, filter, update)
-	return err
+	return result.ModifiedCount == 1, nil
 }
 
 func (r *applicationRepository) UpdateLastMessage(
@@ -246,21 +277,19 @@ func (r *applicationRepository) ListMessages(
 	ctx context.Context,
 	threadID bson.ObjectID,
 	limit int,
-	before *time.Time,
+	cursor *messagecursor.Cursor,
 ) ([]Message, error) {
 
 	filter := bson.M{
 		"thread_id": threadID,
 	}
 
-	if before != nil {
-		filter["sent_at"] = bson.M{
-			"$lt": *before,
-		}
+	if beforeFilter := messagecursor.BeforeFilter(cursor); beforeFilter != nil {
+		filter["$or"] = beforeFilter["$or"]
 	}
 
 	opts := options.Find().
-		SetSort(bson.D{{Key: "sent_at", Value: -1}})
+		SetSort(bson.D{{Key: "sent_at", Value: -1}, {Key: "_id", Value: -1}})
 
 	if limit > 0 {
 		opts.SetLimit(int64(limit))

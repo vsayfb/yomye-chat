@@ -10,16 +10,18 @@ import (
 )
 
 type fakeUserServiceClient struct {
-	getUserCalled bool
-	users         []*pb.User
+	getUserCalled   bool
+	getUserDeadline bool
+	users           []*pb.User
 }
 
 func (f *fakeUserServiceClient) GetUser(
-	context.Context,
-	*pb.GetUserRequest,
-	...grpc.CallOption,
+	ctx context.Context,
+	_ *pb.GetUserRequest,
+	_ ...grpc.CallOption,
 ) (*pb.GetUserResponse, error) {
 	f.getUserCalled = true
+	_, f.getUserDeadline = ctx.Deadline()
 	return &pb.GetUserResponse{}, nil
 }
 
@@ -106,5 +108,37 @@ func TestAllowsSocialDirectMessagesDefaultsToDisabled(t *testing.T) {
 	}
 	if got {
 		t.Fatal("missing preference field must default to disabled")
+	}
+}
+
+func TestGetUserAppliesCoreRPCDeadline(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeUserServiceClient{}
+	client := &UserClient{client: fake}
+	if _, err := client.GetUser(context.Background(), "user-id"); err != nil {
+		t.Fatalf("GetUser() error = %v", err)
+	}
+	if !fake.getUserDeadline {
+		t.Fatal("GetUser() must apply a Core RPC deadline")
+	}
+}
+
+func TestCoreRPCDeadlineDoesNotExtendCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	parent, cancelParent := context.WithTimeout(context.Background(), coreRPCTimeout/2)
+	defer cancelParent()
+
+	ctx, cancel := withCoreRPCTimeout(parent)
+	defer cancel()
+
+	parentDeadline, _ := parent.Deadline()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("withCoreRPCTimeout() did not set a deadline")
+	}
+	if !deadline.Equal(parentDeadline) {
+		t.Fatalf("deadline = %s, want caller deadline %s", deadline, parentDeadline)
 	}
 }

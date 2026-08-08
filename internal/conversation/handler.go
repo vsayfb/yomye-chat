@@ -5,11 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/vsayfb/gig-platform-chat-service/internal/messagecursor"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/httputil"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/middleware"
 )
@@ -65,14 +65,13 @@ func (h *Handler) ListMessages(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 
-	var before *time.Time
-	if value := r.URL.Query().Get("before"); value != "" {
-		parsed, err := time.Parse(time.RFC3339, value)
-		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, "Invalid before")
-			return
-		}
-		before = &parsed
+	cursor, err := messagecursor.Parse(
+		r.URL.Query().Get("before"),
+		r.URL.Query().Get("before_id"),
+	)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "Invalid message cursor")
+		return
 	}
 
 	result, err := h.service.ListMessages(
@@ -80,7 +79,7 @@ func (h *Handler) ListMessages(w http.ResponseWriter, r *http.Request) {
 		middleware.GetUserID(r.Context()),
 		id,
 		limit,
-		before,
+		cursor,
 	)
 	if err != nil {
 		writeServiceError(w, r, err)

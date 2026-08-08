@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vsayfb/gig-platform-chat-service/internal/messagecursor"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -213,7 +214,7 @@ func (r *fakeRepository) ListMessages(
 	_ context.Context,
 	conversationID bson.ObjectID,
 	limit int,
-	_ *time.Time,
+	_ *messagecursor.Cursor,
 ) ([]Message, error) {
 	var result []Message
 	for _, message := range r.messages {

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/vsayfb/gig-platform-chat-service/internal/messagecursor"
+
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -27,7 +29,7 @@ type Repository interface {
 		ctx context.Context,
 		conversationID bson.ObjectID,
 		limit int,
-		before *time.Time,
+		cursor *messagecursor.Cursor,
 	) ([]Message, error)
 }
 
@@ -61,8 +63,12 @@ func (r *repository) EnsureIndexes(ctx context.Context) error {
 	}
 
 	_, err := r.messages.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "conversation_id", Value: 1}, {Key: "sent_at", Value: -1}},
-		Options: options.Index().SetName("conversation_messages"),
+		Keys: bson.D{
+			{Key: "conversation_id", Value: 1},
+			{Key: "sent_at", Value: -1},
+			{Key: "_id", Value: -1},
+		},
+		Options: options.Index().SetName("conversation_messages_v2"),
 	})
 	return err
 }
@@ -154,14 +160,16 @@ func (r *repository) ListMessages(
 	ctx context.Context,
 	conversationID bson.ObjectID,
 	limit int,
-	before *time.Time,
+	cursor *messagecursor.Cursor,
 ) ([]Message, error) {
 	filter := bson.M{"conversation_id": conversationID}
-	if before != nil {
-		filter["sent_at"] = bson.M{"$lt": *before}
+	if beforeFilter := messagecursor.BeforeFilter(cursor); beforeFilter != nil {
+		filter["$or"] = beforeFilter["$or"]
 	}
 
-	opts := options.Find().SetSort(bson.D{{Key: "sent_at", Value: -1}})
+	opts := options.Find().SetSort(
+		bson.D{{Key: "sent_at", Value: -1}, {Key: "_id", Value: -1}},
+	)
 	if limit > 0 {
 		opts.SetLimit(int64(limit))
 	}

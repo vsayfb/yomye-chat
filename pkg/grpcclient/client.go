@@ -3,11 +3,18 @@ package grpcclient
 import (
 	"context"
 	"fmt"
+	"time"
 
 	pb "github.com/vsayfb/gig-platform-protos/contracts"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+const coreRPCTimeout = 3 * time.Second
+
+func withCoreRPCTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, coreRPCTimeout)
+}
 
 type UserClient struct {
 	client pb.UserServiceClient
@@ -20,6 +27,9 @@ func NewUserClient(conn *grpc.ClientConn) *UserClient {
 }
 
 func (c *UserClient) GetUser(ctx context.Context, userID string) (*pb.GetUserResponse, error) {
+	ctx, cancel := withCoreRPCTimeout(ctx)
+	defer cancel()
+
 	resp, err := c.client.GetUser(
 		ctx,
 		&pb.GetUserRequest{
@@ -89,6 +99,9 @@ func allowsSocialDirectMessages(user *pb.User) (bool, error) {
 }
 
 func (c *UserClient) GetUsers(ctx context.Context, userIDs []string) (*pb.GetUsersResponse, error) {
+	ctx, cancel := withCoreRPCTimeout(ctx)
+	defer cancel()
+
 	resp, err := c.client.GetUsers(
 		ctx,
 		&pb.GetUsersRequest{
@@ -113,6 +126,9 @@ func NewGigClient(conn *grpc.ClientConn) *GigClient {
 }
 
 func (c *GigClient) GetGig(ctx context.Context, gigID string) (*pb.GetGigResponse, error) {
+	ctx, cancel := withCoreRPCTimeout(ctx)
+	defer cancel()
+
 	resp, err := c.client.GetGig(
 		ctx,
 		&pb.GetGigRequest{

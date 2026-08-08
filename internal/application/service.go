@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
+	"github.com/vsayfb/gig-platform-chat-service/internal/messagecursor"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
@@ -36,7 +37,7 @@ type Service interface {
 		userID string,
 		threadID bson.ObjectID,
 		limit int,
-		cursor *time.Time,
+		cursor *messagecursor.Cursor,
 	) ([]Message, error)
 
 	// Messages
@@ -121,27 +122,10 @@ func (s *applicationService) ApproveApplication(
 	threadID bson.ObjectID,
 	approverID string,
 ) error {
-
-	app, err := s.repo.FindApplicationByID(ctx, threadID)
-	if err != nil {
-		return err
-	}
-
-	if app == nil {
-		return ErrApplicationNotFound
-	}
-
-	if app.TargetID != approverID {
-		return ErrForbidden
-	}
-
-	if app.Status != ApplicationStatusPending {
-		return ErrInvalidApplicationStatus
-	}
-
-	return s.repo.UpdateApplicationStatus(
+	return s.transitionPendingApplication(
 		ctx,
 		threadID,
+		approverID,
 		ApplicationStatusAccepted,
 	)
 }
@@ -153,30 +137,48 @@ func (s *applicationService) RejectApplication(
 	threadID bson.ObjectID,
 	rejectorID string,
 ) error {
+	return s.transitionPendingApplication(
+		ctx,
+		threadID,
+		rejectorID,
+		ApplicationStatusRejected,
+	)
+}
 
-	app, err := s.repo.FindApplicationByID(ctx, threadID)
-
+func (s *applicationService) transitionPendingApplication(
+	ctx context.Context,
+	threadID bson.ObjectID,
+	targetID string,
+	to ApplicationStatus,
+) error {
+	transitioned, err := s.repo.TransitionApplicationStatus(
+		ctx,
+		threadID,
+		targetID,
+		ApplicationStatusPending,
+		to,
+	)
 	if err != nil {
 		return err
 	}
+	if transitioned {
+		return nil
+	}
 
+	// The compare-and-set did not match. Re-read only to classify the failure
+	// for the existing HTTP contract; the state transition itself is already
+	// race-safe because it happened in the conditional update above.
+	app, err := s.repo.FindApplicationByID(ctx, threadID)
+	if err != nil {
+		return err
+	}
 	if app == nil {
 		return ErrApplicationNotFound
 	}
-
-	if app.TargetID != rejectorID {
+	if app.TargetID != targetID {
 		return ErrForbidden
 	}
-
-	if app.Status != ApplicationStatusPending {
-		return ErrInvalidApplicationStatus
-	}
-
-	return s.repo.UpdateApplicationStatus(
-		ctx,
-		threadID,
-		ApplicationStatusRejected,
-	)
+	return ErrInvalidApplicationStatus
 }
 
 func (s *applicationService) ListMessages(
@@ -184,7 +186,7 @@ func (s *applicationService) ListMessages(
 	userID string,
 	threadID bson.ObjectID,
 	limit int,
-	cursor *time.Time,
+	cursor *messagecursor.Cursor,
 ) ([]Message, error) {
 
 	app, err := s.repo.FindApplicationByID(ctx, threadID)

@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/vsayfb/gig-platform-chat-service/internal/messagecursor"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/httputil"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/middleware"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -95,7 +95,7 @@ func (h *ApplicationHandler) GetApplication(
 	httputil.WriteJSON(w, http.StatusOK, app)
 }
 
-// GET /applications/{threadID}/messages?before=&limit=50
+// GET /applications/{threadID}/messages?before=&before_id=&limit=50
 func (h *ApplicationHandler) ListMessages(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -132,21 +132,13 @@ func (h *ApplicationHandler) ListMessages(
 		limit = n
 	}
 
-	var before *time.Time
-
-	if v := q.Get("before"); v != "" {
-
-		t, err := time.Parse(time.RFC3339, v)
-
-		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, "Invalid before")
-			return
-		}
-
-		before = &t
+	cursor, err := messagecursor.Parse(q.Get("before"), q.Get("before_id"))
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "Invalid message cursor")
+		return
 	}
 
-	messages, err := h.applicationSvc.ListMessages(ctx, userID, threadID, limit, before)
+	messages, err := h.applicationSvc.ListMessages(ctx, userID, threadID, limit, cursor)
 
 	if err != nil {
 		switch {
