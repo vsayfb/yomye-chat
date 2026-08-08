@@ -120,8 +120,12 @@ func TestDownloadReauthorizesCurrentParticipation(t *testing.T) {
 }
 
 type fakeRepository struct {
-	items          map[bson.ObjectID]*Attachment
-	markReadyCalls int
+	items              map[bson.ObjectID]*Attachment
+	markReadyCalls     int
+	claimExpired       *Attachment
+	markDeletedCalls   int
+	retryDeletionCalls int
+	retryDeletionNext  time.Time
 }
 
 func newFakeRepository() *fakeRepository {
@@ -164,12 +168,15 @@ func (r *fakeRepository) MarkAttached(
 	return 0, nil
 }
 func (r *fakeRepository) ClaimExpired(context.Context, time.Time) (*Attachment, error) {
-	return nil, nil
+	return r.claimExpired, nil
 }
 func (r *fakeRepository) MarkDeleted(context.Context, bson.ObjectID, time.Time) error {
+	r.markDeletedCalls++
 	return nil
 }
-func (r *fakeRepository) RetryDeletion(context.Context, bson.ObjectID, time.Time) error {
+func (r *fakeRepository) RetryDeletion(_ context.Context, _ bson.ObjectID, next time.Time) error {
+	r.retryDeletionCalls++
+	r.retryDeletionNext = next
 	return nil
 }
 
@@ -179,6 +186,8 @@ type fakeStore struct {
 	presignedBeforeCreate bool
 	verifyCalls           int
 	downloadCalls         int
+	deleteCalls           int
+	deleteErr             error
 }
 
 func (s *fakeStore) NewObjectKey(scope, contentType string) (string, error) {
@@ -216,7 +225,10 @@ func (s *fakeStore) Verify(context.Context, r2.VerifyRequest) (*r2.Object, error
 	s.verifyCalls++
 	return s.object, nil
 }
-func (s *fakeStore) Delete(context.Context, string) error { return nil }
+func (s *fakeStore) Delete(context.Context, string) error {
+	s.deleteCalls++
+	return s.deleteErr
+}
 
 func newTestService(repo Repository, store ObjectStore) *Service {
 	service := NewService(
@@ -229,3 +241,62 @@ func newTestService(repo Repository, store ObjectStore) *Service {
 }
 
 func timePointer(value time.Time) *time.Time { return &value }
+
+func TestCleanupOneDeletesClaimedObjectAndMarksRecordDeleted(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo}
+	service := newTestService(repo, store)
+	repo.claimExpired = &Attachment{ID: bson.NewObjectID(), ObjectKey: "chat/expired", DeletionAttempts: 1}
+
+	worked, err := service.CleanupOne(context.Background())
+	if err != nil {
+		t.Fatalf("CleanupOne() error = %v", err)
+	}
+	if !worked || store.deleteCalls != 1 || repo.markDeletedCalls != 1 {
+		t.Fatalf("cleanup result worked=%v deleteCalls=%d markDeletedCalls=%d", worked, store.deleteCalls, repo.markDeletedCalls)
+	}
+}
+
+func TestCleanupOneSchedulesRetryWhenObjectDeletionFails(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo, deleteErr: errors.New("storage unavailable")}
+	service := newTestService(repo, store)
+	now := service.now()
+	repo.claimExpired = &Attachment{
+		ID: bson.NewObjectID(), ObjectKey: "chat/expired", DeletionAttempts: 3,
+	}
+
+	worked, err := service.CleanupOne(context.Background())
+	if err == nil || !worked {
+		t.Fatalf("CleanupOne() worked=%v err=%v, want worked with deletion error", worked, err)
+	}
+	if repo.retryDeletionCalls != 1 {
+		t.Fatalf("retry calls = %d, want 1", repo.retryDeletionCalls)
+	}
+	if want := now.Add(3 * time.Minute); !repo.retryDeletionNext.Equal(want) {
+		t.Fatalf("retry time = %v, want %v", repo.retryDeletionNext, want)
+	}
+	if repo.markDeletedCalls != 0 {
+		t.Fatal("failed storage deletion marked attachment deleted")
+	}
+}
+
+func TestCleanupOneDoesNothingWhenNothingIsClaimed(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo}
+	service := newTestService(repo, store)
+
+	worked, err := service.CleanupOne(context.Background())
+	if err != nil || worked {
+		t.Fatalf("CleanupOne() worked=%v err=%v, want no work", worked, err)
+	}
+	if store.deleteCalls != 0 {
+		t.Fatal("storage delete called without a claimed attachment")
+	}
+}

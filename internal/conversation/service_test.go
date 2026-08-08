@@ -182,10 +182,11 @@ func TestOtherDirectMemberRejectsNonMember(t *testing.T) {
 }
 
 type fakeRepository struct {
-	conversations map[bson.ObjectID]*Conversation
-	byDirectKey   map[string]*Conversation
-	messages      []*Message
-	byClientID    map[string]*Message
+	conversations     map[bson.ObjectID]*Conversation
+	byDirectKey       map[string]*Conversation
+	messages          []*Message
+	byClientID        map[string]*Message
+	listMessagesCalls int
 }
 
 func newFakeRepository() *fakeRepository {
@@ -276,6 +277,7 @@ func (r *fakeRepository) ListMessages(
 	limit int,
 	_ *messagecursor.Cursor,
 ) ([]Message, error) {
+	r.listMessagesCalls++
 	var result []Message
 	for _, message := range r.messages {
 		if message.ConversationID == conversationID {

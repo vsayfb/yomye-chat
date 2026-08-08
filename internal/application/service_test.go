@@ -81,8 +81,14 @@ func TestInitialApplicationMessageRetryReturnsPersistedMessage(t *testing.T) {
 }
 
 type idempotencyRepository struct {
-	app      *Application
-	messages map[string]*Message
+	app               *Application
+	applications      []Application
+	messages          map[string]*Message
+	listedMessages    []Message
+	listMessagesCalls int
+	updateErr         error
+	createMessageErr  error
+	deleteCalls       int
 }
 
 func newIdempotencyRepository() *idempotencyRepository {
@@ -121,7 +127,7 @@ func (r *idempotencyRepository) FindApplicationByID(
 }
 
 func (r *idempotencyRepository) ListApplications(context.Context, string) ([]Application, error) {
-	return nil, nil
+	return r.applications, nil
 }
 
 func (r *idempotencyRepository) CreateApplication(_ context.Context, app *Application) error {
@@ -134,6 +140,7 @@ func (r *idempotencyRepository) CreateApplication(_ context.Context, app *Applic
 }
 
 func (r *idempotencyRepository) DeleteApplication(_ context.Context, threadID bson.ObjectID) error {
+	r.deleteCalls++
 	if r.app != nil && r.app.ID == threadID {
 		r.app = nil
 	}
@@ -156,6 +163,9 @@ func (r *idempotencyRepository) UpdateLastMessage(
 	content string,
 	sentAt time.Time,
 ) error {
+	if r.updateErr != nil {
+		return r.updateErr
+	}
 	if r.app != nil && r.app.ID == threadID {
 		r.app.LastMessage = content
 		r.app.LastMessageAt = sentAt
@@ -175,6 +185,9 @@ func (r *idempotencyRepository) CreateOrGetMessage(
 	_ context.Context,
 	message *Message,
 ) (*Message, bool, error) {
+	if r.createMessageErr != nil {
+		return nil, false, r.createMessageErr
+	}
 	key := message.SenderID + "\x00" + message.ClientMessageID
 	if existing := r.messages[key]; existing != nil {
 		return existing, false, nil
@@ -192,5 +205,6 @@ func (r *idempotencyRepository) ListMessages(
 	int,
 	*messagecursor.Cursor,
 ) ([]Message, error) {
-	return nil, nil
+	r.listMessagesCalls++
+	return r.listedMessages, nil
 }

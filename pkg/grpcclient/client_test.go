@@ -10,26 +10,32 @@ import (
 )
 
 type fakeUserServiceClient struct {
-	getUserCalled   bool
-	getUserDeadline bool
-	users           []*pb.User
+	getUserCalled    bool
+	getUserDeadline  bool
+	getUserRequestID string
+	getUsersDeadline bool
+	getUsersIDs      []string
+	users            []*pb.User
 }
 
 func (f *fakeUserServiceClient) GetUser(
 	ctx context.Context,
-	_ *pb.GetUserRequest,
+	req *pb.GetUserRequest,
 	_ ...grpc.CallOption,
 ) (*pb.GetUserResponse, error) {
 	f.getUserCalled = true
+	f.getUserRequestID = req.GetUserId()
 	_, f.getUserDeadline = ctx.Deadline()
 	return &pb.GetUserResponse{}, nil
 }
 
 func (f *fakeUserServiceClient) GetUsers(
-	_ context.Context,
-	_ *pb.GetUsersRequest,
+	ctx context.Context,
+	req *pb.GetUsersRequest,
 	_ ...grpc.CallOption,
 ) (*pb.GetUsersResponse, error) {
+	_, f.getUsersDeadline = ctx.Deadline()
+	f.getUsersIDs = append([]string(nil), req.GetUserIds()...)
 	return &pb.GetUsersResponse{Users: f.users}, nil
 }
 
@@ -140,5 +146,77 @@ func TestCoreRPCDeadlineDoesNotExtendCallerDeadline(t *testing.T) {
 	}
 	if !deadline.Equal(parentDeadline) {
 		t.Fatalf("deadline = %s, want caller deadline %s", deadline, parentDeadline)
+	}
+}
+
+func TestGetUserForwardsIDAndAppliesDeadline(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeUserServiceClient{}
+	client := &UserClient{client: fake}
+	if _, err := client.GetUser(context.Background(), "user-123"); err != nil {
+		t.Fatal(err)
+	}
+	if fake.getUserRequestID != "user-123" || !fake.getUserDeadline {
+		t.Fatalf("GetUser forwarded id=%q deadline=%v", fake.getUserRequestID, fake.getUserDeadline)
+	}
+}
+
+func TestGetUsersForwardsIDsAndAppliesDeadline(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeUserServiceClient{}
+	client := &UserClient{client: fake}
+	if _, err := client.GetUsers(context.Background(), []string{"user-a", "user-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.getUsersDeadline {
+		t.Fatal("GetUsers() must apply a Core RPC deadline")
+	}
+	if len(fake.getUsersIDs) != 2 || fake.getUsersIDs[0] != "user-a" || fake.getUsersIDs[1] != "user-b" {
+		t.Fatalf("GetUsers() IDs = %v", fake.getUsersIDs)
+	}
+}
+
+func TestAllowsSocialDirectMessagesRejectsMalformedPreferenceWireData(t *testing.T) {
+	t.Parallel()
+
+	user := &pb.User{Id: "target-id"}
+	data := protowire.AppendTag(nil, 4, protowire.BytesType)
+	data = protowire.AppendString(data, "true")
+	user.ProtoReflect().SetUnknown(data)
+
+	allowed, err := allowsSocialDirectMessages(user)
+	if err == nil || allowed {
+		t.Fatalf("malformed preference must fail closed: allowed=%v err=%v", allowed, err)
+	}
+}
+
+type fakeGigServiceClient struct {
+	pb.GigServiceClient
+	deadline bool
+	gigID    string
+}
+
+func (f *fakeGigServiceClient) GetGig(
+	ctx context.Context,
+	req *pb.GetGigRequest,
+	_ ...grpc.CallOption,
+) (*pb.GetGigResponse, error) {
+	_, f.deadline = ctx.Deadline()
+	f.gigID = req.GetGigId()
+	return &pb.GetGigResponse{}, nil
+}
+
+func TestGetGigForwardsIDAndAppliesDeadline(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeGigServiceClient{}
+	client := &GigClient{client: fake}
+	if _, err := client.GetGig(context.Background(), "gig-123"); err != nil {
+		t.Fatal(err)
+	}
+	if fake.gigID != "gig-123" || !fake.deadline {
+		t.Fatalf("GetGig forwarded id=%q deadline=%v", fake.gigID, fake.deadline)
 	}
 }

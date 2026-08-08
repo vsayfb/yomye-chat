@@ -470,6 +470,16 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   cases must prove that rejected operations left no private Chat state behind.
   Run `make test-integration`; use `make test-integration-race` for concurrency
   changes. Never report this suite as passing unless Docker actually executed it.
+- **Critical unit-test coverage pass — implemented.** Unit tests complement, but
+  do not replace, the integration suite. Keep deterministic package-level tests
+  around authentication/context propagation, query-secret-safe logging/tracing,
+  hub route selection and wait semantics, application/direct authorization and
+  status classification, attachment validation/cleanup backoff, WebSocket ticket
+  malformed/expiry behavior, Core request/deadline forwarding, AWS credential
+  provider selection, environment-controlled OTLP addressing, and HTTP response
+  envelopes. Use mocks/fakes only at the unit boundary; do not use a unit fake to
+  claim a MongoDB/protocol/concurrency guarantee. Run `make test-unit`; use
+  `make test-unit-race` for concurrency-sensitive package changes.
 - **Rate limiting and caching — deferred until stabilization.** Do not add
   per-user/IP WebSocket, message, attachment-authorization, confirmation, or
   download rate limits yet, and do not introduce caching merely as premature
@@ -594,6 +604,18 @@ Chat uses two distinct test layers and they must not be conflated:
   mock Chat's `grpcclient`/service interfaces inside an integration test.
 - **E2E tests:** when added, these may run the deployed Chat service against real
   staging dependencies to validate the complete deployed environment.
+
+Run the package-local unit suite with:
+
+```bash
+make test-unit
+```
+
+For unit changes involving concurrency-sensitive packages, also run:
+
+```bash
+make test-unit-race
+```
 
 The Docker-backed integration harness lives under `integration/`. Run it with:
 

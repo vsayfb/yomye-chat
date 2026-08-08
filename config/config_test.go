@@ -74,3 +74,64 @@ func TestAWSParameterPathByEnvironment(t *testing.T) {
 		t.Fatal("development unexpectedly has an AWS parameter path")
 	}
 }
+
+func TestLoadEnvKeepsOTelCollectorEnvironmentControlled(t *testing.T) {
+	setRequiredDevelopmentEnv(t)
+	t.Setenv(EnvOTelCollectorAddr, "otel-collector:4317")
+
+	cfg, err := loadEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OTelCollectorAddr != "otel-collector:4317" {
+		t.Fatalf("OTelCollectorAddr = %q, want Docker collector hostname", cfg.OTelCollectorAddr)
+	}
+}
+
+func TestLoadEnvDefaultsOTelCollectorToLocalhost(t *testing.T) {
+	setRequiredDevelopmentEnv(t)
+	t.Setenv(EnvOTelCollectorAddr, "")
+
+	cfg, err := loadEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OTelCollectorAddr != DefaultOtelCollectorAddr {
+		t.Fatalf("OTelCollectorAddr = %q, want %q", cfg.OTelCollectorAddr, DefaultOtelCollectorAddr)
+	}
+}
+
+func TestMustParseDurationRejectsInvalidValue(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("mustParseDuration() did not panic")
+		}
+	}()
+	_ = mustParseDuration("not-a-duration")
+}
+
+func setRequiredDevelopmentEnv(t *testing.T) {
+	t.Helper()
+	values := map[string]string{
+		EnvJWTSecret:            "secret",
+		EnvMongoURI:             "mongodb://localhost:27017",
+		EnvMongoDB:              "chat_test",
+		EnvUserServiceGRPCAddr:  "core:9090",
+		EnvOTelTraceSampleRatio: "1.0",
+		EnvR2AccountID:          "account",
+		EnvR2AccessKeyID:        "access",
+		EnvR2SecretAccessKey:    "secret",
+		EnvR2Bucket:             "bucket",
+		EnvR2ObjectPrefix:       "chat",
+		EnvR2UploadURLExpiry:    "10m",
+		EnvR2DownloadURLExpiry:  "5m",
+		EnvAWSRegion:            "eu-central-1",
+		EnvAWSAccessKeyID:       "test",
+		EnvAWSSecretAccessKey:   "test",
+		EnvSQSEndpoint:          "http://localhost:4566",
+		SQSNotificationQueueURL: "http://localhost:4566/000000000000/notifications",
+	}
+	for key, value := range values {
+		t.Setenv(key, value)
+	}
+}
