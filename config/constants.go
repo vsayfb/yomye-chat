@@ -17,9 +17,9 @@ const (
 	EnvMongoURI = "MONGO_URI"
 	EnvMongoDB  = "MONGO_DB"
 
-	EnvUserServiceGRPCAddr = "USER_SERVICE_GRPC_ADDR"
-	EnvMetricsServerPort   = "METRICS_SERVER_PORT"
-	EnvOTelCollectorAddr   = "OTEL_COLLECTOR_ADDR"
+	EnvUserServiceGRPCAddr  = "USER_SERVICE_GRPC_ADDR"
+	EnvOTelCollectorAddr    = "OTEL_COLLECTOR_ADDR"
+	EnvOTelTraceSampleRatio = "OTEL_TRACE_SAMPLE_RATIO"
 
 	EnvR2AccountID         = "R2_ACCOUNT_ID"
 	EnvR2AccessKeyID       = "R2_ACCESS_KEY_ID"
@@ -31,11 +31,12 @@ const (
 )
 
 const (
-	DefaultServiceName         = "chat-service"
-	DefaultServerPort          = "8081"
-	DefaultMetricsServerPort   = ":9100"
-	DefaultOtelCollectorAddr   = "localhost:4317"
-	DefaultUserServiceGRPCAddr = "localhost:9090"
+	DefaultServiceName                 = "chat-service"
+	DefaultServerPort                  = "8081"
+	DefaultOtelCollectorAddr           = "localhost:4317"
+	DefaultUserServiceGRPCAddr         = "localhost:9090"
+	DefaultDevelopmentTraceSampleRatio = "1.0"
+	DefaultStagingTraceSampleRatio     = "0.25"
 
 	DefaultJWTExpiration        = "15m"
 	DefaultJWTRefreshExpiration = "720h"

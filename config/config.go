@@ -17,9 +17,9 @@ type Config struct {
 	MongoURI string
 	MongoDB  string
 
-	UserServiceGRPCAddr string
-	MetricsServerPort   string
-	OTelCollectorAddr   string
+	UserServiceGRPCAddr  string
+	OTelCollectorAddr    string
+	OTelTraceSampleRatio float64
 
 	R2 R2Config
 

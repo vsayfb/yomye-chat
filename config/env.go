@@ -17,8 +17,11 @@ func loadEnv() (*Config, error) {
 		MongoURI:            mustGetEnv(EnvMongoURI),
 		MongoDB:             mustGetEnv(EnvMongoDB),
 		UserServiceGRPCAddr: getEnv(EnvUserServiceGRPCAddr, DefaultUserServiceGRPCAddr),
-		MetricsServerPort:   getEnv(EnvMetricsServerPort, DefaultMetricsServerPort),
 		OTelCollectorAddr:   getEnv(EnvOTelCollectorAddr, DefaultOtelCollectorAddr),
+		OTelTraceSampleRatio: mustParseRatio(getEnv(
+			EnvOTelTraceSampleRatio,
+			DefaultDevelopmentTraceSampleRatio,
+		)),
 		R2: R2Config{
 			AccountID:       mustGetEnv(EnvR2AccountID),
 			AccessKeyID:     mustGetEnv(EnvR2AccessKeyID),

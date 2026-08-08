@@ -42,6 +42,12 @@ type telemetryState struct {
 	shutdown func(context.Context) error
 }
 
+const (
+	httpReadHeaderTimeout = 5 * time.Second
+	httpIdleTimeout       = 60 * time.Second
+	httpMaxHeaderBytes    = 64 << 10
+)
+
 func (t *telemetryState) set(shutdown func(context.Context) error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -62,12 +68,7 @@ func initTelemetryWithRetry(
 	logHandler slog.Handler,
 	state *telemetryState,
 ) {
-	const (
-		retryInterval = 30 * time.Second
-		retryTimeout  = 5 * time.Minute
-	)
-
-	deadline := time.Now().Add(retryTimeout)
+	const retryInterval = 30 * time.Second
 
 	ticker := time.NewTicker(retryInterval)
 	defer ticker.Stop()
@@ -77,6 +78,7 @@ func initTelemetryWithRetry(
 			ctx,
 			cfg.ServiceName,
 			cfg.OTelCollectorAddr,
+			cfg.OTelTraceSampleRatio,
 		)
 
 		if err == nil {
@@ -93,14 +95,10 @@ func initTelemetryWithRetry(
 				slog.New(tracing.NewOTelHandler(logHandler)),
 			)
 
-			slog.Info("telemetry initialized")
-			return
-		}
-
-		if time.Now().After(deadline) {
-			slog.Error(
-				"failed to initialize telemetry after retries",
-				"error", err,
+			slog.Info(
+				"telemetry initialized",
+				"collector", cfg.OTelCollectorAddr,
+				"trace_sample_ratio", cfg.OTelTraceSampleRatio,
 			)
 			return
 		}
@@ -322,6 +320,7 @@ func main() {
 
 	r.Use(chimiddleware.Heartbeat("/health"))
 	r.Use(chimiddleware.RequestID)
+	r.Use(middleware.Recovery)
 	r.Use(middleware.Logger)
 	r.Use(middleware.MetricsMiddleware)
 	r.Use(middleware.TracingMiddleware)
@@ -364,8 +363,11 @@ func main() {
 	go runAttachmentCleanup(cleanupCtx, attachmentSvc)
 
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: r,
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		MaxHeaderBytes:    httpMaxHeaderBytes,
 	}
 
 	serverErr := make(chan error, 1)

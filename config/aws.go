@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,14 +73,14 @@ func loadAWS(ctx context.Context) (*Config, error) {
 			EnvUserServiceGRPCAddr,
 			DefaultUserServiceGRPCAddr,
 		),
-		MetricsServerPort: getEnv(
-			EnvMetricsServerPort,
-			DefaultMetricsServerPort,
-		),
 		OTelCollectorAddr: getEnv(
 			EnvOTelCollectorAddr,
 			DefaultOtelCollectorAddr,
 		),
+		OTelTraceSampleRatio: mustParseRatio(getEnv(
+			EnvOTelTraceSampleRatio,
+			DefaultStagingTraceSampleRatio,
+		)),
 	}, nil
 }
 
@@ -158,4 +160,13 @@ func mustParseDuration(s string) time.Duration {
 		panic(fmt.Sprintf("invalid duration %q: %v", s, err))
 	}
 	return d
+}
+
+func mustParseRatio(s string) float64 {
+	ratio, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(ratio) || ratio < 0 || ratio > 1 {
+		panic(fmt.Sprintf("invalid trace sample ratio %q; expected a number between 0 and 1", s))
+	}
+
+	return ratio
 }
