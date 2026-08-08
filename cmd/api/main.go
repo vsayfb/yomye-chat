@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/gorilla/websocket"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/vsayfb/gig-platform-chat-service/config"
@@ -360,7 +361,6 @@ func main() {
 	})
 
 	cleanupCtx, cleanupCancel := context.WithCancel(ctx)
-	defer cleanupCancel()
 	go runAttachmentCleanup(cleanupCtx, attachmentSvc)
 
 	srv := &http.Server{
@@ -393,16 +393,26 @@ func main() {
 		slog.Info("shutting down chat service")
 	}
 
-	telemetryCancel()
-
 	shutdownCtx, cancel := context.WithTimeout(
 		context.Background(),
-		10*time.Second,
+		15*time.Second,
 	)
 	defer cancel()
 
+	// Stop background work before disconnecting any of its dependencies.
+	cleanupCancel()
+	telemetryCancel()
+
+	// Shutdown closes the HTTP listeners first, preventing new upgrades. The
+	// hub then enters drain mode, closes all hijacked WebSockets, and waits for
+	// their handlers to leave before MongoDB is disconnected.
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("failed to shutdown HTTP server", "err", err)
+	}
+
+	h.Shutdown(websocket.CloseGoingAway, "server_shutdown")
+	if err := h.Wait(shutdownCtx); err != nil {
+		slog.Error("failed waiting for WebSocket handlers", "err", err)
 	}
 
 	if err := mongoClient.Disconnect(shutdownCtx); err != nil {

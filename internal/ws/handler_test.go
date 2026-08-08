@@ -138,3 +138,34 @@ func TestNotificationPreviewTruncatesAfterReplacingMascotToken(t *testing.T) {
 		t.Fatalf("notificationPreview() exposed raw mascot token: %q", preview)
 	}
 }
+
+func TestValidateMessageContentEnforcesLogicalLength(t *testing.T) {
+	t.Parallel()
+
+	if code, _, ok := validateMessageContent(strings.Repeat("a", maxMessageLogicalLength)); !ok || code != "" {
+		t.Fatalf("max-length message rejected: code=%q ok=%v", code, ok)
+	}
+
+	code, message, ok := validateMessageContent(strings.Repeat("a", maxMessageLogicalLength+1))
+	if ok {
+		t.Fatal("over-limit message was accepted")
+	}
+	if code != "message_too_long" {
+		t.Fatalf("over-limit code = %q, want message_too_long", code)
+	}
+	if message == "" {
+		t.Fatal("over-limit message is empty")
+	}
+}
+
+func TestValidateMessageContentStillValidatesMascotTokens(t *testing.T) {
+	t.Parallel()
+
+	code, _, ok := validateMessageContent("hello :yovmiye_unknown:")
+	if ok {
+		t.Fatal("unsupported mascot token was accepted")
+	}
+	if code != "invalid_emoji" {
+		t.Fatalf("invalid mascot code = %q, want invalid_emoji", code)
+	}
+}

@@ -43,16 +43,6 @@ func loadAWS(ctx context.Context) (*Config, error) {
 		slog.Debug("loaded SSM parameter", "name", k)
 	}
 
-	creds, err := awsCfg.Credentials.Retrieve(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("retrieve AWS credentials: %w", err)
-	}
-
-	var endpoint string
-	if awsCfg.BaseEndpoint != nil {
-		endpoint = *awsCfg.BaseEndpoint
-	}
-
 	return &Config{
 		ServiceName: getEnv(EnvServiceName, DefaultServiceName),
 		AppEnv:      EnvironmentStaging,
@@ -64,9 +54,6 @@ func loadAWS(ctx context.Context) (*Config, error) {
 
 		AWS: AWSConfig{
 			Region:                  awsCfg.Region,
-			AccessKeyID:             creds.AccessKeyID,
-			SecretAccessKey:         creds.SecretAccessKey,
-			SQSEndpoint:             endpoint,
 			SQSNotificationQueueURL: params[ParameterSQSNotificationEventsQueueURL],
 		},
 

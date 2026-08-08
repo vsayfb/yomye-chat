@@ -47,7 +47,7 @@ func (h *Handler) authorizeUpload(
 		return
 	}
 	var request uploadRequest
-	if err := httputil.DecodeJSON(r, &request); err != nil {
+	if err := httputil.DecodeJSON(w, r, &request); err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}

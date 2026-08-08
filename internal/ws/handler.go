@@ -38,6 +38,7 @@ const (
 	closeReasonTokenExpired = "access_token_expired"
 	channelApplication      = "application"
 	channelDirect           = "direct"
+	maxMessageLogicalLength = 4000
 )
 
 // incomingMessage is what the client sends over WebSocket.
@@ -80,6 +81,16 @@ type outgoingAccepted struct {
 	ThreadID        string `json:"thread_id,omitempty"`
 	ConversationID  string `json:"conversation_id,omitempty"`
 	SentAt          string `json:"sent_at"`
+}
+
+func validateMessageContent(content string) (code string, message string, ok bool) {
+	if messagecontent.LogicalLength(content) > maxMessageLogicalLength {
+		return "message_too_long", "Message content exceeds the 4000 character limit.", false
+	}
+	if err := messagecontent.Validate(content); err != nil {
+		return "invalid_emoji", "Unsupported Yövmiye emoji.", false
+	}
+	return "", "", true
 }
 
 type WSHandler struct {
@@ -206,14 +217,10 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 4. Register in Hub
-	client := &hub.Client{
-		UserID:     senderID,
-		ReceiverID: receiver.ID,
-		Channel:    channelApplication,
-		Conn:       conn,
+	client := hub.NewClient(senderID, receiver.ID, channelApplication, conn)
+	if !h.hub.Register(client) {
+		return
 	}
-
-	h.hub.Register(client)
 
 	slog.InfoContext(ctx, "ws: client connected", "userID", senderID, "ReceiverID", receiver.ID, "gigID", gig.ID)
 
@@ -222,13 +229,12 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		// and reconnect. Closing the connection then unblocks the read loop even
 		// when the client is idle.
 		_ = client.Close(closeAccessTokenExpired, closeReasonTokenExpired)
-		_ = conn.Close()
 	})
 
 	defer func() {
 		expiryTimer.Stop()
+		_ = client.Close(websocket.CloseNormalClosure, "")
 		h.hub.Unregister(client)
-		conn.Close()
 		slog.InfoContext(ctx, "ws: client disconnected", "userID", senderID)
 	}()
 
@@ -268,12 +274,12 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 			)
 			continue
 		}
-		if err := messagecontent.Validate(incoming.Content); err != nil {
+		if code, message, ok := validateMessageContent(incoming.Content); !ok {
 			h.writeClientError(
 				client,
 				incoming.ClientMessageID,
-				"invalid_emoji",
-				"Unsupported Yövmiye emoji.",
+				code,
+				message,
 			)
 			continue
 		}
@@ -592,23 +598,19 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &hub.Client{
-		UserID:     sender.ID,
-		ReceiverID: targetID,
-		Channel:    channelDirect,
-		Conn:       conn,
+	client := hub.NewClient(sender.ID, targetID, channelDirect, conn)
+	if !h.hub.Register(client) {
+		return
 	}
-	h.hub.Register(client)
 
 	expiryTimer := time.AfterFunc(time.Until(claims.ExpiresAt.Time), func() {
 		_ = client.Close(closeAccessTokenExpired, closeReasonTokenExpired)
-		_ = conn.Close()
 	})
 
 	defer func() {
 		expiryTimer.Stop()
+		_ = client.Close(websocket.CloseNormalClosure, "")
 		h.hub.Unregister(client)
-		_ = conn.Close()
 		slog.InfoContext(ctx, "ws: direct client disconnected", "user_id", sender.ID)
 	}()
 
@@ -651,12 +653,12 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 			)
 			continue
 		}
-		if err := messagecontent.Validate(incoming.Content); err != nil {
+		if code, message, ok := validateMessageContent(incoming.Content); !ok {
 			h.writeClientError(
 				client,
 				incoming.ClientMessageID,
-				"invalid_emoji",
-				"Unsupported Yövmiye emoji.",
+				code,
+				message,
 			)
 			continue
 		}
@@ -849,9 +851,7 @@ func (h *WSHandler) writeClientError(
 	if err != nil {
 		return
 	}
-	if err := client.Send(payload); err != nil {
-		h.hub.Unregister(client)
-	}
+	_ = client.Send(payload)
 }
 
 func (h *WSHandler) writeAccepted(client *hub.Client, accepted outgoingAccepted) {
@@ -859,9 +859,7 @@ func (h *WSHandler) writeAccepted(client *hub.Client, accepted outgoingAccepted)
 	if err != nil {
 		return
 	}
-	if err := client.Send(payload); err != nil {
-		h.hub.Unregister(client)
-	}
+	_ = client.Send(payload)
 }
 
 func (h *WSHandler) sendMessageError(
@@ -880,9 +878,7 @@ func (h *WSHandler) sendMessageError(
 	if marshalErr != nil {
 		return
 	}
-	if writeErr := client.Send(payload); writeErr != nil {
-		h.hub.Unregister(client)
-	}
+	_ = client.Send(payload)
 }
 
 func applicationMessageError(err error) (string, string) {

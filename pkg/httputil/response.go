@@ -2,8 +2,12 @@ package httputil
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 )
+
+const maxJSONBodyBytes int64 = 64 << 10 // 64 KiB
 
 type SuccessResponse struct {
 	Status int `json:"status"`
@@ -38,6 +42,23 @@ func WriteError(w http.ResponseWriter, status int, description string) {
 	})
 }
 
-func DecodeJSON(r *http.Request, v any) error {
-	return json.NewDecoder(r.Body).Decode(v)
+func DecodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return errors.New("request body must contain a single JSON value")
+	}
+
+	return nil
 }

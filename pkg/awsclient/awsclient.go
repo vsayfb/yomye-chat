@@ -10,8 +10,11 @@ import (
 )
 
 func New(ctx context.Context, cfg *config.Config) (aws.Config, error) {
-	if cfg.AppEnv == config.EnvironmentProduction {
-		return awscfg.LoadDefaultConfig(ctx)
+	if cfg.AppEnv != config.EnvironmentDevelopment {
+		return awscfg.LoadDefaultConfig(
+			ctx,
+			awscfg.WithRegion(cfg.AWS.Region),
+		)
 	}
 
 	return awscfg.LoadDefaultConfig(
