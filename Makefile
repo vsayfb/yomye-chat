@@ -1,4 +1,4 @@
-.PHONY: run up build rebuild down restart clean logs fresh test-integration
+.PHONY: run up build rebuild down restart clean logs fresh test-integration test-integration-race
 
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
@@ -43,3 +43,7 @@ fresh:
 
 test-integration:
 	./integration/run.sh
+
+test-integration-race:
+	INTEGRATION_RACE=1 ./integration/run.sh
+

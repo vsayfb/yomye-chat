@@ -376,7 +376,10 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   the durable message and has a unique `(sender_id, client_message_id)` index in
   both application-message and direct-message collections. A retry returns the
   originally persisted message/acknowledgement and does not re-broadcast or
-  publish another notification. Attachment retries are checked for replay before
+  publish another notification. Concurrent identical retries are also part of
+  the contract: if two upserts race at the unique index, the duplicate-key loser
+  resolves and returns the already-persisted message rather than surfacing the
+  database race to the client. Attachment retries are checked for replay before
   READY -> ATTACHED validation, and transactional replay callbacks report that no
   new message was created so attachments are not transitioned twice.
 - **WebSocket ticket authentication and origin policy — implemented.** Core
@@ -412,6 +415,13 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   caller deadline. `grpc.NewClient` remains lazy and is not treated as a Core
   health check; request-time calls are bounded rather than allowed to hang on
   transport/connectivity behavior.
+- **Core response integrity — implemented and tested.** Application first-contact
+  resolution fails closed unless Core `GetUser` returns a non-nil user whose ID
+  exactly matches the requested target, and unless `GetGig` returns a non-nil gig.
+  Malformed, missing, mismatched, unavailable, or timed-out Core responses must
+  fail before WebSocket upgrade and before Chat mutates conversation/application
+  persistence. Direct-message privacy lookup already requires the `GetUsers`
+  response to contain exactly the requested target and fails closed otherwise.
 - **Core gRPC transport security — staging decision resolved; production boundary open.**
   In staging, Core and Chat run on the same EC2 instance, so plaintext gRPC over
   the host-local/private path is intentional and does not require TLS. If a future
@@ -451,6 +461,15 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   and explicit values must be between 0 and 1. The unused
   `METRICS_SERVER_PORT` setting was removed; do not add a second metrics server
   unless the observability architecture intentionally changes.
+- **Critical Docker-backed integration suite — implemented.** Integration tests
+  are required for Chat-owned persistence/protocol guarantees that mocks cannot
+  prove. The suite uses a real MongoDB replica set and real HTTP/WebSocket Chat
+  handlers; Core is represented only at its external boundary by a real TCP gRPC
+  protocol server. Persistence-sensitive assertions inspect MongoDB directly,
+  concurrent idempotency is tested at the unique-index race, and security failure
+  cases must prove that rejected operations left no private Chat state behind.
+  Run `make test-integration`; use `make test-integration-race` for concurrency
+  changes. Never report this suite as passing unless Docker actually executed it.
 - **Rate limiting and caching — deferred until stabilization.** Do not add
   per-user/IP WebSocket, message, attachment-authorization, confirmation, or
   download rate limits yet, and do not introduce caching merely as premature
@@ -582,19 +601,34 @@ The Docker-backed integration harness lives under `integration/`. Run it with:
 make test-integration
 ```
 
-The harness currently starts a disposable MongoDB 8 single-node replica set and
-runs the integration build-tag suite in a `golang:1.26.4` container, matching
-the repository toolchain without depending on the host Go installation. The first
-integration scenario proves
-direct-message retry idempotency through the real ticket endpoint and real
-WebSocket handlers: the first send is persisted and delivered, a reconnect uses a
-new one-time ticket, retrying the same `client_message_id` receives the original
-acknowledgement, MongoDB still contains exactly one durable message, and the
-recipient does not receive a duplicate delivery.
+Run the same suite under Go's race detector with:
 
-Do not claim integration behavior passed unless the Docker-backed suite actually
-ran. A package-local mocked repository test is not evidence that a MongoDB index,
-transaction, cursor, or concurrency guarantee works in deployment.
+```bash
+make test-integration-race
+```
+
+The harness starts a disposable MongoDB 8 single-node replica set and runs the
+integration build-tag suite in a `golang:1.26.4` container, matching the
+repository toolchain without depending on the host Go installation. The critical
+suite covers JWT/ticket/origin security, native-vs-browser origin behavior, real
+WebSocket send/ack/retry behavior, direct-route and application-vs-direct channel
+isolation, sequential and concurrent direct/application idempotency, application
+status/transition races, complete stable-cursor pagination, private HTTP and
+WebSocket authorization, required Mongo indexes, attachment transactions plus
+scope/uploader isolation, malformed/empty/oversized messages, readiness,
+shutdown draining, offline notification idempotency, SQS failure isolation, and
+Core timeout/privacy/malformed-response boundaries. Core integration uses a real
+TCP gRPC server speaking the generated protobuf contract; SQS boundary tests use
+the real AWS SDK client against a local protocol endpoint. Neither replaces
+Chat-owned repositories/services with mocks.
+
+Persistence-sensitive tests must assert MongoDB state directly in addition to
+protocol responses. Security rejection tests must also verify that rejected
+requests did not create private Chat state where relevant. Do not claim
+integration behavior passed unless the Docker-backed suite actually ran. A
+package-local mocked repository test is not evidence that a MongoDB index,
+transaction, cursor, concurrency guarantee, WebSocket routing rule, or external
+protocol boundary works in deployment.
 
 ## Verification
 

@@ -44,5 +44,10 @@ if ! compose exec -T mongodb mongosh --quiet --port 27018 --eval \
     exit 1
 fi
 
+GO_TEST_ARGS=(-count=1 -shuffle=on -tags=integration -timeout=5m)
+if [[ "${INTEGRATION_RACE:-0}" == "1" ]]; then
+    GO_TEST_ARGS+=(-race)
+fi
+
 compose run --rm test-runner \
-    go test -count=1 -tags=integration ./integration/...
+    go test "${GO_TEST_ARGS[@]}" ./integration/...

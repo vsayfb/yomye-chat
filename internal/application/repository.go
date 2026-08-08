@@ -320,6 +320,22 @@ func (r *applicationRepository) CreateOrGetMessage(
 			SetReturnDocument(options.After),
 	).Decode(&persisted)
 	if err != nil {
+		// Two identical retries can race between the upsert query and the
+		// unique (sender_id, client_message_id) index. In that case the
+		// duplicate-key loser is still an idempotent replay, not a failure.
+		if mongo.IsDuplicateKeyError(err) {
+			existing, findErr := r.FindMessageByClientMessageID(
+				ctx,
+				message.SenderID,
+				message.ClientMessageID,
+			)
+			if findErr != nil {
+				return nil, false, findErr
+			}
+			if existing != nil {
+				return existing, false, nil
+			}
+		}
 		return nil, false, err
 	}
 

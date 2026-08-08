@@ -409,11 +409,17 @@ func (h *WSHandler) resolveByParticipants(
 	if err != nil {
 		return nil, nil, internalError("internal server error", err)
 	}
+	if resp == nil || resp.GetUser() == nil || resp.GetUser().GetId() != receiverID {
+		return nil, nil, internalError(
+			"internal server error",
+			errors.New("Core GetUser returned missing or mismatched target"),
+		)
+	}
 
 	receiver := &dto.Receiver{
-		ID:        resp.User.GetId(),
-		AvatarURL: resp.GetUser().AvatarUrl,
-		Name:      resp.GetUser().Name,
+		ID:        resp.GetUser().GetId(),
+		AvatarURL: resp.GetUser().GetAvatarUrl(),
+		Name:      resp.GetUser().GetName(),
 	}
 
 	gigID := r.URL.Query().Get("gigID")
@@ -427,10 +433,16 @@ func (h *WSHandler) resolveByParticipants(
 	if err != nil {
 		return nil, nil, internalError("internal server error", err)
 	}
+	if gigResp == nil || gigResp.GetGig() == nil {
+		return nil, nil, internalError(
+			"internal server error",
+			errors.New("Core GetGig returned no gig"),
+		)
+	}
 
 	gig := &dto.Gig{
 		ID:    gigID,
-		Title: gigResp.Gig.GetTitle(),
+		Title: gigResp.GetGig().GetTitle(),
 	}
 
 	return receiver, gig, nil
