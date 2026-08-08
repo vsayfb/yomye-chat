@@ -1,4 +1,4 @@
-.PHONY: run up build rebuild down restart clean logs fresh
+.PHONY: run up build rebuild down restart clean logs fresh test-integration
 
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
@@ -40,3 +40,6 @@ fresh:
 	docker compose down -v --remove-orphans
 	docker compose build --no-cache
 	docker compose up -d --force-recreate
+
+test-integration:
+	./integration/run.sh

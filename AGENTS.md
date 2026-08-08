@@ -559,6 +559,43 @@ tests around every security boundary.
 - Prefer primary-source documentation when behavior depends on R2, AWS, Mongo,
   browser WebSocket, or another evolving external system.
 
+## Testing strategy
+
+Chat uses two distinct test layers and they must not be conflated:
+
+- **Unit tests:** package-local isolation tests. Mocks/fakes/stubs are allowed when
+  they make the unit boundary explicit and keep tests deterministic.
+- **Integration tests:** exercise real Chat-owned infrastructure and real protocol
+  behavior. Chat repositories, MongoDB behavior, HTTP handlers, ticket handling,
+  WebSocket connections, transactions, indexes, and persistence must not be
+  replaced with mocks. Docker containers provide infrastructure dependencies.
+- **External service boundaries:** integration tests may use protocol-level test
+  doubles because Chat is not responsible for testing another service. For Core,
+  use a real TCP gRPC server implementing the generated protobuf contract; do not
+  mock Chat's `grpcclient`/service interfaces inside an integration test.
+- **E2E tests:** when added, these may run the deployed Chat service against real
+  staging dependencies to validate the complete deployed environment.
+
+The Docker-backed integration harness lives under `integration/`. Run it with:
+
+```bash
+make test-integration
+```
+
+The harness currently starts a disposable MongoDB 8 single-node replica set and
+runs the integration build-tag suite in a `golang:1.26.4` container, matching
+the repository toolchain without depending on the host Go installation. The first
+integration scenario proves
+direct-message retry idempotency through the real ticket endpoint and real
+WebSocket handlers: the first send is persisted and delivered, a reconnect uses a
+new one-time ticket, retrying the same `client_message_id` receives the original
+acknowledgement, MongoDB still contains exactly one durable message, and the
+recipient does not receive a duplicate delivery.
+
+Do not claim integration behavior passed unless the Docker-backed suite actually
+ran. A package-local mocked repository test is not evidence that a MongoDB index,
+transaction, cursor, or concurrency guarantee works in deployment.
+
 ## Verification
 
 For normal Go changes, run at least:
@@ -573,6 +610,12 @@ For concurrency, hub, WebSocket, transaction, or attachment changes, run:
 
 ```bash
 go test -race ./...
+```
+
+For persistence/protocol integration changes, also run the Docker-backed suite:
+
+```bash
+make test-integration
 ```
 
 If `go` is not on PATH in the agent environment, use

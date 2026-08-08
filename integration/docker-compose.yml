@@ -1,0 +1,38 @@
+services:
+  mongodb:
+    image: mongo:8
+    command:
+      - mongod
+      - --port
+      - "27018"
+      - --replSet
+      - rs0
+      - --bind_ip_all
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --port 27018 --eval
+          'try { if (db.hello().isWritablePrimary) { quit(0) } } catch (e) {} quit(1)'
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 2s
+
+  test-runner:
+    image: golang:1.26.4
+    working_dir: /workspace
+    environment:
+      CHAT_INTEGRATION_MONGO_URI: mongodb://mongodb:27018/?replicaSet=rs0
+      GOTOOLCHAIN: local
+    volumes:
+      - ..:/workspace
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+volumes:
+  go-mod-cache:
+  go-build-cache:
