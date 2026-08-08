@@ -1,14 +1,21 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
+	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
+	chatjwt "github.com/vsayfb/gig-platform-chat-service/pkg/jwt"
+	"github.com/vsayfb/gig-platform-chat-service/pkg/middleware"
 )
 
 func TestNotificationPreviewDoesNotExposeMascotToken(t *testing.T) {
@@ -184,5 +191,120 @@ func TestValidateClientMessageID(t *testing.T) {
 	tooLong := strings.Repeat("a", maxClientMessageIDLength+1)
 	if code, _, ok := validateClientMessageID(tooLong); ok || code != "invalid_client_message_id" {
 		t.Fatalf("oversized client_message_id: code=%q ok=%v", code, ok)
+	}
+}
+
+func TestOriginPolicyAllowsAnyOriginInDevelopment(t *testing.T) {
+	t.Parallel()
+
+	h := &WSHandler{allowAnyOrigin: true}
+	r := httptest.NewRequest("GET", "http://chat/ws", nil)
+	r.Header.Set("Origin", "https://untrusted.example")
+	if !h.originAllowed(r) {
+		t.Fatal("development origin policy rejected an origin")
+	}
+}
+
+func TestOriginPolicyEnforcesConfiguredBrowserOrigins(t *testing.T) {
+	t.Parallel()
+
+	h := &WSHandler{allowedOrigins: map[string]struct{}{
+		"https://staging.yevmiye.com": {},
+	}}
+
+	allowed := httptest.NewRequest("GET", "http://chat/ws", nil)
+	allowed.Header.Set("Origin", "https://staging.yevmiye.com")
+	if !h.originAllowed(allowed) {
+		t.Fatal("configured browser origin was rejected")
+	}
+
+	rejected := httptest.NewRequest("GET", "http://chat/ws", nil)
+	rejected.Header.Set("Origin", "https://evil.example")
+	if h.originAllowed(rejected) {
+		t.Fatal("unconfigured browser origin was accepted")
+	}
+
+	native := httptest.NewRequest("GET", "http://chat/ws", nil)
+	if !h.originAllowed(native) {
+		t.Fatal("native request without Origin was rejected")
+	}
+}
+
+func TestAuthenticateTicketConsumesTicketOnce(t *testing.T) {
+	t.Parallel()
+
+	store := wsticket.NewStore(time.Minute)
+	claims := &chatjwt.Claims{RegisteredClaims: gojwt.RegisteredClaims{
+		Subject:   "9e2a9df0-ea28-433a-8b8b-920cb86eb62d",
+		ExpiresAt: gojwt.NewNumericDate(time.Now().Add(time.Hour)),
+	}}
+	ticket, _, err := store.Issue(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := &WSHandler{allowAnyOrigin: true, tickets: store}
+	request := httptest.NewRequest("GET", "http://chat/ws?ticket="+ticket, nil)
+	response := httptest.NewRecorder()
+	got, ok := h.authenticateTicket(response, request)
+	if !ok || got.Subject != claims.Subject {
+		t.Fatalf("authenticateTicket() = (%+v, %v)", got, ok)
+	}
+
+	response = httptest.NewRecorder()
+	if _, ok := h.authenticateTicket(response, request); ok {
+		t.Fatal("consumed ticket was accepted twice")
+	}
+	if response.Code != 401 {
+		t.Fatalf("second ticket use status = %d, want 401", response.Code)
+	}
+}
+
+func TestAuthenticateTicketRejectsLegacyJWTQueryParameter(t *testing.T) {
+	t.Parallel()
+
+	h := &WSHandler{allowAnyOrigin: true, tickets: wsticket.NewStore(time.Minute)}
+	request := httptest.NewRequest("GET", "http://chat/ws?token=legacy-jwt", nil)
+	response := httptest.NewRecorder()
+	if _, ok := h.authenticateTicket(response, request); ok {
+		t.Fatal("legacy token query parameter was accepted")
+	}
+	if response.Code != 401 {
+		t.Fatalf("legacy token status = %d, want 401", response.Code)
+	}
+}
+
+func TestIssueTicketReturnsNoStoreOneTimeCredential(t *testing.T) {
+	t.Parallel()
+
+	store := wsticket.NewStore(time.Minute)
+	h := &WSHandler{allowAnyOrigin: true, tickets: store}
+	claims := &chatjwt.Claims{RegisteredClaims: gojwt.RegisteredClaims{
+		Subject:   "9e2a9df0-ea28-433a-8b8b-920cb86eb62d",
+		ExpiresAt: gojwt.NewNumericDate(time.Now().Add(time.Hour)),
+	}}
+	ctx := context.WithValue(context.Background(), middleware.ClaimsKey, claims)
+	request := httptest.NewRequest("POST", "http://chat/ws/ticket", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+
+	h.IssueTicket(response, request)
+	if response.Code != 201 {
+		t.Fatalf("IssueTicket() status = %d, want 201", response.Code)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+
+	var payload struct {
+		Data ticketResponse `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Data.Ticket) != 64 || payload.Data.ExpiresAt == "" {
+		t.Fatalf("ticket response = %+v", payload.Data)
+	}
+	if _, err := store.Consume(payload.Data.Ticket); err != nil {
+		t.Fatalf("issued ticket was not consumable: %v", err)
 	}
 }

@@ -20,6 +20,7 @@ type Config struct {
 	UserServiceGRPCAddr  string
 	OTelCollectorAddr    string
 	OTelTraceSampleRatio float64
+	WSAllowedOrigins     []string
 
 	R2 R2Config
 
@@ -49,7 +50,7 @@ func Load(ctx context.Context) (*Config, error) {
 	env := getEnv(AppEnv, EnvironmentDevelopment)
 
 	if env == EnvironmentStaging {
-		return loadAWS(ctx)
+		return loadAWS(ctx, EnvironmentStaging)
 	}
 
 	if env == EnvironmentProduction {

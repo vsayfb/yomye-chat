@@ -24,6 +24,7 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
 	"github.com/vsayfb/gig-platform-chat-service/internal/ws"
+	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/awsclient"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/database"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/grpcclient"
@@ -260,15 +261,18 @@ func main() {
 		cfg.AWS.SQSNotificationQueueURL,
 	)
 
+	ticketStore := wsticket.NewStore(wsticket.DefaultTTL)
 	wsHandler := ws.NewWSHandler(
 		h,
-		jwtSvc,
+		ticketStore,
 		applicationSvc,
 		conversationSvc,
 		attachmentSvc,
 		sqsPublisher,
 		userClient,
 		gigClient,
+		cfg.AppEnv == config.EnvironmentDevelopment,
+		cfg.WSAllowedOrigins,
 	)
 
 	telemetryCtx, telemetryCancel := context.WithCancel(ctx)
@@ -293,10 +297,15 @@ func main() {
 
 	r := chi.NewRouter()
 
+	corsOrigins := cfg.WSAllowedOrigins
+	allowCredentials := true
+	if cfg.AppEnv == config.EnvironmentDevelopment {
+		corsOrigins = []string{"*"}
+		allowCredentials = false
+	}
+
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins: []string{
-			"http://localhost:3000",
-		},
+		AllowedOrigins: corsOrigins,
 		AllowedMethods: []string{
 			"GET",
 			"POST",
@@ -314,7 +323,7 @@ func main() {
 		ExposedHeaders: []string{
 			"Link",
 		},
-		AllowCredentials: true,
+		AllowCredentials: allowCredentials,
 		MaxAge:           300,
 	}))
 
@@ -325,10 +334,10 @@ func main() {
 	r.Use(middleware.MetricsMiddleware)
 	r.Use(middleware.TracingMiddleware)
 
+	authMiddleware := middleware.Auth(jwtSvc)
+	r.With(authMiddleware).Post("/ws/ticket", wsHandler.IssueTicket)
 	r.Get("/ws", wsHandler.ServeWS)
 	r.Get("/ws/direct", wsHandler.ServeDirectWS)
-
-	authMiddleware := middleware.Auth(jwtSvc)
 
 	r.Route("/applications", func(r chi.Router) {
 		r.With(authMiddleware).Get("/me", applicationHandler.ListApplications)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +15,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
-const ParameterPath = "/yevmiye/staging/"
+const StagingParameterPath = "/yevmiye/staging/"
+
+const ProductionParameterPath = "/yevmiye/production/"
 
 const (
 	ParameterMongoURISecret                = "mongo-db-uri"
@@ -25,9 +28,10 @@ const (
 	SSMParameterR2AccessKeyID              = "r2-access-key-id"
 	SSMParameterR2SecretAccessKey          = "r2-secret-access-key"
 	SSMParameterR2Bucket                   = "r2-bucket"
+	SSMParameterWSAllowedOrigins           = "ws-allowed-origins"
 )
 
-func loadAWS(ctx context.Context) (*Config, error) {
+func loadAWS(ctx context.Context, environment string) (*Config, error) {
 	awsCfg, err := awscfg.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
@@ -35,7 +39,12 @@ func loadAWS(ctx context.Context) (*Config, error) {
 
 	ssmClient := ssm.NewFromConfig(awsCfg)
 
-	params, err := loadParameters(ctx, ssmClient)
+	parameterPath, err := awsParameterPath(environment)
+	if err != nil {
+		return nil, err
+	}
+
+	params, err := loadParameters(ctx, ssmClient, parameterPath)
 	if err != nil {
 		return nil, err
 	}
@@ -47,12 +56,13 @@ func loadAWS(ctx context.Context) (*Config, error) {
 
 	return &Config{
 		ServiceName: getEnv(EnvServiceName, DefaultServiceName),
-		AppEnv:      EnvironmentStaging,
+		AppEnv:      environment,
 		Port:        getEnv(EnvServerPort, DefaultServerPort),
 
-		JWTSecret: params[ParameterJWTSecret],
-		MongoURI:  params[ParameterMongoURISecret],
-		MongoDB:   params[ParameterMongoDBName],
+		JWTSecret:        params[ParameterJWTSecret],
+		WSAllowedOrigins: mustParseAllowedOrigins(params[SSMParameterWSAllowedOrigins]),
+		MongoURI:         params[ParameterMongoURISecret],
+		MongoDB:          params[ParameterMongoDBName],
 
 		AWS: AWSConfig{
 			Region:                  awsCfg.Region,
@@ -84,16 +94,28 @@ func loadAWS(ctx context.Context) (*Config, error) {
 	}, nil
 }
 
-func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string, error) {
+func awsParameterPath(environment string) (string, error) {
+	switch environment {
+	case EnvironmentStaging:
+		return StagingParameterPath, nil
+	case EnvironmentProduction:
+		return ProductionParameterPath, nil
+	default:
+		return "", fmt.Errorf("unsupported AWS environment %q", environment)
+	}
+}
+
+func loadParameters(ctx context.Context, client *ssm.Client, parameterPath string) (map[string]string, error) {
 	names := []string{
-		parameter(ParameterJWTSecret),
-		parameter(ParameterMongoURISecret),
-		parameter(ParameterMongoDBName),
-		parameter(ParameterSQSNotificationEventsQueueURL),
-		parameter(SSMParameterR2AccountID),
-		parameter(SSMParameterR2AccessKeyID),
-		parameter(SSMParameterR2SecretAccessKey),
-		parameter(SSMParameterR2Bucket),
+		parameter(parameterPath, ParameterJWTSecret),
+		parameter(parameterPath, ParameterMongoURISecret),
+		parameter(parameterPath, ParameterMongoDBName),
+		parameter(parameterPath, ParameterSQSNotificationEventsQueueURL),
+		parameter(parameterPath, SSMParameterR2AccountID),
+		parameter(parameterPath, SSMParameterR2AccessKeyID),
+		parameter(parameterPath, SSMParameterR2SecretAccessKey),
+		parameter(parameterPath, SSMParameterR2Bucket),
+		parameter(parameterPath, SSMParameterWSAllowedOrigins),
 	}
 
 	out, err := client.GetParameters(ctx, &ssm.GetParametersInput{
@@ -117,12 +139,12 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 		name := aws.ToString(p.Name)
 		value := aws.ToString(p.Value)
 
-		key, found := strings.CutPrefix(name, ParameterPath)
+		key, found := strings.CutPrefix(name, parameterPath)
 		if !found {
 			return nil, fmt.Errorf(
 				"unexpected SSM parameter name %q; expected prefix %q",
 				name,
-				ParameterPath,
+				parameterPath,
 			)
 		}
 
@@ -139,6 +161,7 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 		SSMParameterR2AccessKeyID,
 		SSMParameterR2SecretAccessKey,
 		SSMParameterR2Bucket,
+		SSMParameterWSAllowedOrigins,
 	}
 
 	for _, key := range required {
@@ -150,8 +173,8 @@ func loadParameters(ctx context.Context, client *ssm.Client) (map[string]string,
 	return params, nil
 }
 
-func parameter(name string) string {
-	return ParameterPath + name
+func parameter(parameterPath, name string) string {
+	return parameterPath + name
 }
 
 func mustParseDuration(s string) time.Duration {
@@ -169,4 +192,50 @@ func mustParseRatio(s string) float64 {
 	}
 
 	return ratio
+}
+
+func mustParseAllowedOrigins(value string) []string {
+	parts := strings.Split(value, ",")
+	origins := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+
+	for _, part := range parts {
+		origin, err := canonicalOrigin(strings.TrimSpace(part))
+		if err != nil {
+			panic(fmt.Sprintf("invalid websocket origin %q: %v", part, err))
+		}
+		if _, ok := seen[origin]; ok {
+			continue
+		}
+		seen[origin] = struct{}{}
+		origins = append(origins, origin)
+	}
+
+	if len(origins) == 0 {
+		panic("websocket allowed origins must not be empty")
+	}
+
+	return origins
+}
+
+func canonicalOrigin(value string) (string, error) {
+	if value == "" {
+		return "", fmt.Errorf("origin is empty")
+	}
+
+	u, err := url.Parse(value)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("scheme must be http or https")
+	}
+	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("origin must contain only scheme and host")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("origin must not contain a path")
+	}
+
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host), nil
 }

@@ -11,7 +11,10 @@ import (
 
 type contextKey string
 
-const UserIDKey contextKey = "userID"
+const (
+	UserIDKey contextKey = "userID"
+	ClaimsKey contextKey = "claims"
+)
 
 func Auth(jwtSvc *jwt.Service) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -34,6 +37,7 @@ func Auth(jwtSvc *jwt.Service) func(http.Handler) http.Handler {
 			}
 
 			ctx := context.WithValue(r.Context(), UserIDKey, claims.Subject)
+			ctx = context.WithValue(ctx, ClaimsKey, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -42,4 +46,9 @@ func Auth(jwtSvc *jwt.Service) func(http.Handler) http.Handler {
 func GetUserID(ctx context.Context) string {
 	id, _ := ctx.Value(UserIDKey).(string)
 	return id
+}
+
+func GetClaims(ctx context.Context) *jwt.Claims {
+	claims, _ := ctx.Value(ClaimsKey).(*jwt.Claims)
+	return claims
 }

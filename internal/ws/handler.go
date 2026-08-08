@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,22 +18,14 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
 	"github.com/vsayfb/gig-platform-chat-service/internal/messagecontent"
+	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/dto"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/grpcclient"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/httputil"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/jwt"
-	"github.com/vsayfb/gig-platform-chat-service/pkg/sqs"
-
+	"github.com/vsayfb/gig-platform-chat-service/pkg/middleware"
 	mysqs "github.com/vsayfb/gig-platform-chat-service/pkg/sqs"
 )
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // tighten in production
-	},
-}
 
 const (
 	closeAccessTokenExpired  = 4001
@@ -104,35 +98,128 @@ func validateMessageContent(content string) (code string, message string, ok boo
 
 type WSHandler struct {
 	hub             *hub.Hub
-	jwtSvc          *jwt.Service
+	tickets         *wsticket.Store
 	applicationSvc  application.Service
 	conversationSvc conversation.Service
 	attachmentSvc   *attachment.Service
 	userClient      *grpcclient.UserClient
 	gigClient       *grpcclient.GigClient
 	publisher       *mysqs.Publisher
+	allowAnyOrigin  bool
+	allowedOrigins  map[string]struct{}
+	upgrader        websocket.Upgrader
 }
 
 func NewWSHandler(
 	h *hub.Hub,
-	jwtSvc *jwt.Service,
+	tickets *wsticket.Store,
 	applicationSvc application.Service,
 	conversationSvc conversation.Service,
 	attachmentSvc *attachment.Service,
 	publisher *mysqs.Publisher,
 	userClient *grpcclient.UserClient,
 	gigClient *grpcclient.GigClient,
+	allowAnyOrigin bool,
+	allowedOrigins []string,
 ) *WSHandler {
-	return &WSHandler{
+	handler := &WSHandler{
 		hub:             h,
-		jwtSvc:          jwtSvc,
+		tickets:         tickets,
 		applicationSvc:  applicationSvc,
 		conversationSvc: conversationSvc,
 		attachmentSvc:   attachmentSvc,
 		publisher:       publisher,
 		userClient:      userClient,
 		gigClient:       gigClient,
+		allowAnyOrigin:  allowAnyOrigin,
+		allowedOrigins:  make(map[string]struct{}, len(allowedOrigins)),
 	}
+	for _, origin := range allowedOrigins {
+		handler.allowedOrigins[origin] = struct{}{}
+	}
+	handler.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     handler.originAllowed,
+	}
+	return handler
+}
+
+type ticketResponse struct {
+	Ticket    string `json:"ticket"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// IssueTicket exchanges an authenticated Core access JWT for a short-lived,
+// one-time WebSocket ticket. The raw access JWT never needs to appear in a
+// WebSocket URL.
+func (h *WSHandler) IssueTicket(w http.ResponseWriter, r *http.Request) {
+	if !h.originAllowed(r) {
+		httputil.WriteError(w, http.StatusForbidden, "origin not allowed")
+		return
+	}
+
+	claims := middleware.GetClaims(r.Context())
+	if claims == nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+
+	ticket, expiresAt, err := h.tickets.Issue(claims)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "ws: issue ticket failed", "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to issue websocket ticket")
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	httputil.WriteJSON(w, http.StatusCreated, ticketResponse{
+		Ticket:    ticket,
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (h *WSHandler) authenticateTicket(w http.ResponseWriter, r *http.Request) (*jwt.Claims, bool) {
+	if !h.originAllowed(r) {
+		httputil.WriteError(w, http.StatusForbidden, "origin not allowed")
+		return nil, false
+	}
+
+	ticket := r.URL.Query().Get("ticket")
+	if ticket == "" {
+		httputil.WriteError(w, http.StatusUnauthorized, "missing websocket ticket")
+		return nil, false
+	}
+
+	claims, err := h.tickets.Consume(ticket)
+	if err != nil {
+		httputil.WriteError(w, http.StatusUnauthorized, "invalid or expired websocket ticket")
+		return nil, false
+	}
+
+	return claims, true
+}
+
+func (h *WSHandler) originAllowed(r *http.Request) bool {
+	if h.allowAnyOrigin {
+		return true
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Native clients generally do not send a browser Origin header.
+		return true
+	}
+
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return false
+	}
+	canonical := strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	_, ok := h.allowedOrigins[canonical]
+	return ok
 }
 
 // resolveError carries the HTTP status that should be written back to the
@@ -161,30 +248,17 @@ func internalError(msg string, cause error) error {
 //
 //  1. First-contact mode — starts (or resumes, if one already exists) an
 //     application between two participants for a gig:
-//     token=<jwt>, targetID=<uuid>, gigID=<uuid>
+//     ticket=<one-time-ticket>, targetID=<uuid>, gigID=<uuid>
 //
 //  2. Thread-resume mode — reconnects to an application that has already
 //     been created, without needing to know the counterpart or gig again:
-//     token=<jwt>, threadID=<mongoObjectID>
+//     ticket=<one-time-ticket>, threadID=<mongoObjectID>
 func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 1. Authenticate
-	token := r.URL.Query().Get("token")
-
-	if token == "" {
-		slog.WarnContext(ctx, "invalid token", "err", token)
-
-		httputil.WriteError(w, http.StatusUnauthorized, "missing token")
-		return
-	}
-
-	claims, err := h.jwtSvc.Verify(token)
-
-	if err != nil {
-		slog.WarnContext(ctx, "invalid token", "err", err)
-
-		httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
+	// 1. Authenticate with a short-lived, one-time ticket.
+	claims, ok := h.authenticateTicket(w, r)
+	if !ok {
 		return
 	}
 
@@ -202,6 +276,7 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		receiver *dto.Receiver
 		gig      *dto.Gig
 		threadID bson.ObjectID
+		err      error
 	)
 
 	if threadIDParam := r.URL.Query().Get("threadID"); threadIDParam != "" {
@@ -219,7 +294,7 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Upgrade connection
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.ErrorContext(ctx, "ws: upgrade failed", "err", err)
 		return
@@ -310,7 +385,7 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// resolveByParticipants handles first-contact mode: token=<jwt>,
+// resolveByParticipants handles first-contact mode after ticket authentication:
 // targetID=<uuid>, gigID=<uuid>. The application/thread may or may not
 // exist yet — SendMessage creates it lazily on the first message.
 func (h *WSHandler) resolveByParticipants(
@@ -361,7 +436,7 @@ func (h *WSHandler) resolveByParticipants(
 	return receiver, gig, nil
 }
 
-// resolveByThread handles thread-resume mode: token=<jwt>,
+// resolveByThread handles thread-resume mode after ticket authentication:
 // threadID=<mongoObjectID>. The thread must already exist and the caller
 // must be one of its two participants (enforced by GetApplication); the
 // counterpart and gig IDs are derived from the stored application.
@@ -564,7 +639,7 @@ func (h *WSHandler) handleMessage(
 		return
 	}
 
-	event := sqs.Envelope{
+	event := mysqs.Envelope{
 		Type: mysqs.EventNewMessage,
 		Payload: mysqs.NewMessageNotificationEvent{
 			RecipientID:    receiver.ID,
@@ -594,22 +669,15 @@ func (h *WSHandler) handleMessage(
 //
 // First contact:
 //
-//	token=<jwt>, targetID=<uuid>
+//	ticket=<one-time-ticket>, targetID=<uuid>
 //
 // Reconnect:
 //
-//	token=<jwt>, conversationID=<mongoObjectID>
+//	ticket=<one-time-ticket>, conversationID=<mongoObjectID>
 func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		httputil.WriteError(w, http.StatusUnauthorized, "missing token")
-		return
-	}
-
-	claims, err := h.jwtSvc.Verify(token)
-	if err != nil {
-		httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
+	claims, ok := h.authenticateTicket(w, r)
+	if !ok {
 		return
 	}
 
@@ -629,7 +697,7 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 		conversationID, _ = bson.ObjectIDFromHex(value)
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.ErrorContext(ctx, "ws: direct upgrade failed", "error", err)
 		return
@@ -885,7 +953,7 @@ func (h *WSHandler) handleDirectMessage(
 		return
 	}
 
-	event := sqs.Envelope{
+	event := mysqs.Envelope{
 		Type: mysqs.EventNewMessage,
 		Payload: mysqs.NewMessageNotificationEvent{
 			RecipientID:    targetID,

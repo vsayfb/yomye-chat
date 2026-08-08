@@ -88,27 +88,45 @@ Core refresh tokens are deliberately outside this JWT contract: they are opaque
 hashes. A genuine Core refresh token therefore cannot be mistaken for a Chat
 access token because it is not JWT-shaped or signed.
 
-WebSocket connections currently receive the access token as the `token` query
-parameter. After verification, Chat derives the connection deadline from the
-JWT `exp` claim. At expiry it sends close code `4001` with reason
-`access_token_expired`, then closes the connection. The client should refresh
-and reconnect; never keep a socket alive beyond its verified token expiry.
+WebSocket authentication uses a two-step ticket exchange so Core access JWTs
+never appear in WebSocket URLs. The client first calls authenticated
+`POST /ws/ticket` with `Authorization: Bearer <core-access-jwt>`. Chat validates
+the access token through the normal HTTP auth middleware, then returns a random
+one-time WebSocket ticket. Tickets are 256-bit random values encoded as 64 hex
+characters, expire after 30 seconds or at the Core access-token expiry
+(whichever comes first), and are stored server-side only by SHA-256 hash. A
+ticket is atomically consumed on the first WebSocket authentication attempt and
+cannot be reused.
 
-Treat query-string JWTs as bearer credentials. Never log full URLs/query
-strings. A future authentication transport may be safer, but Flutter Web
-compatibility must be evaluated before changing the contract.
+The WebSocket then connects with `ticket=<one-time-ticket>` plus the existing
+routing parameters. Chat carries the verified Core claims from the ticket into
+the socket and derives the connection deadline from the original JWT `exp`
+claim. At expiry it sends close code `4001` with reason `access_token_expired`,
+then closes the connection. The client should refresh and reconnect; never keep
+a socket alive beyond its verified access-token expiry.
 
-Current WebSocket origin checking accepts every origin in
-`internal/ws/handler.go`. This is a development compromise, not a production
-security guarantee. Tighten it before exposing a browser deployment, while
-accounting for native Flutter clients that may not send browser-style Origin.
+The ticket query parameter is still a short-lived bearer credential. Never log
+full URLs/query strings. The application request logger intentionally logs only
+`URL.Path`; infrastructure access logs must be configured with the same
+constraint where practical.
+
+Origin policy is environment-specific. `development` deliberately accepts any
+Origin for local work. `staging` requires browser Origins to match the SSM-backed
+allowlist exactly; native clients that omit the `Origin` header remain allowed.
+The same allowlist is applied to HTTP CORS so browser clients can call
+`POST /ws/ticket`. Production will use the same SSM-backed policy under its own
+parameter path when the deferred production configuration path is enabled.
+
+Implementation note: application WebSocket routing resolves either `threadID` or
+`targetID` + `gigID` before upgrade. The resolver error is deliberately declared
+in the surrounding scope so both branches feed the same error-handling path.
 
 ## Application/listing conversation rules
 
 Connection modes for `/ws`:
 
-- First contact: `token`, `targetID`, and `gigID`.
-- Reconnect: `token` and existing Mongo `threadID`.
+- First contact: `ticket`, `targetID`, and `gigID`.
+- Reconnect: `ticket` and existing Mongo `threadID`.
 
 The first text message lazily creates a pending application. The initiator may
 not send another message while it is pending. The target must approve it;
@@ -123,8 +141,8 @@ two participants.
 
 Connection modes for `/ws/direct`:
 
-- First contact: `token` and `targetID`.
-- Reconnect: `token` and existing Mongo `conversationID`.
+- First contact: `ticket` and `targetID`.
+- Reconnect: `ticket` and existing Mongo `conversationID`.
 
 Self-conversations are forbidden. A canonical sorted `direct_key` and a unique
 Mongo index ensure one direct conversation per pair.
@@ -309,6 +327,7 @@ must still retain its own authorization and lifecycle ownership.
 
 Authenticated REST routes use bearer JWT middleware:
 
+- `POST /ws/ticket` (Bearer Core access JWT -> one-time WebSocket ticket)
 - `GET /applications/me`
 - `GET /applications/{threadID}`
 - `GET /applications/{threadID}/messages?before=<RFC3339Nano>&before_id=<ObjectID>&limit=<1..100>`
@@ -355,10 +374,19 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   publish another notification. Attachment retries are checked for replay before
   READY -> ATTACHED validation, and transactional replay callbacks report that no
   new message was created so attachments are not transitioned twice.
-- **WebSocket origin and query-string JWT transport — deferred.** The current
-  browser-origin policy and `?token=` transport remain unchanged until the
-  staging proxy/browser/native-client topology is known. Never log the query
-  string in the meantime.
+- **WebSocket ticket authentication and origin policy — implemented.** Core
+  access JWTs are accepted only on authenticated `POST /ws/ticket`, never in a
+  WebSocket query string. Chat issues a 30-second, one-time 256-bit random ticket
+  whose stored lookup key is SHA-256; ticket lifetime is also capped by the
+  source access-token expiry. `/ws` and `/ws/direct` accept only `ticket=` and
+  atomically consume it before resolving the conversation. The socket still
+  closes at the original JWT expiry. Development accepts any Origin. Staging
+  browser Origins must match the SSM `ws-allowed-origins` list; missing Origin
+  remains valid for native clients. HTTP CORS uses the same environment policy.
+  Tickets are process-local, matching the current process-local hub/single-EC2
+  staging model. Before horizontal scaling, use a shared one-time ticket store
+  or guaranteed same-instance routing; do not weaken tickets into reusable
+  stateless URL credentials merely to scale.
 - **Mongo indexes — implemented.** Application inbox queries have separate
   `(initiator_id, last_message_at DESC)` and `(target_id, last_message_at DESC)`
   indexes. Application message history uses
@@ -414,9 +442,12 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   good/stable stage, with abuse limits designed around actual traffic.
 - **Staging CI/CD hardening — deferred.** Test/lint/race gates, deployment
   atomicity, health verification, and rollback behavior will be reviewed later.
-- **Production configuration path — deferred.** `loadGCP` remains unimplemented
-  and production mode is still a blocker. Do not claim the service supports the
-  production environment until this path is intentionally designed and tested.
+- **Production configuration path — deferred.** The general production loader
+  remains unimplemented and production mode is still a blocker. The origin
+  policy decision is already fixed: production browser origins come from AWS SSM
+  under `/yevmiye/production/ws-allowed-origins`. Do not claim the service
+  supports the production environment until the remaining production
+  configuration path is intentionally designed and tested.
 
 ## Configuration and deployment
 
@@ -427,8 +458,10 @@ Configuration modes currently are:
   hard-coded `/yevmiye/staging/` prefix. OTel collector address remains an
   environment setting and trace sampling defaults to 25% unless
   `OTEL_TRACE_SAMPLE_RATIO` overrides it.
-- `production`: `loadGCP`, which currently returns `nil, nil` and is not
-  production-ready. Treat this as a blocker, not a harmless placeholder.
+- `production`: the general production loader is still deferred/unimplemented.
+  The WebSocket-origin source is nevertheless decided: use the AWS SSM
+  `/yevmiye/production/ws-allowed-origins` parameter when that loader is enabled.
+  Do not claim the full production configuration path is ready yet.
 
 Staging SSM parameters:
 
@@ -440,6 +473,9 @@ Staging SSM parameters:
 - `r2-access-key-id`
 - `r2-secret-access-key`
 - `r2-bucket`
+- `ws-allowed-origins` (comma-separated browser origins, for example
+  `https://staging.example.com`; `String` is sufficient unless policy requires
+  `SecureString`)
 
 Sensitive values should be `SecureString`; the runtime role needs least-
 privilege `ssm:GetParameters`, relevant `kms:Decrypt`, and `sqs:SendMessage`.
@@ -469,7 +505,6 @@ External HTTP/WSS TLS is expected to terminate at trusted infrastructure.
 
 Before treating the service as internet-production-ready, explicitly review:
 
-- WebSocket `CheckOrigin` currently allows all origins.
 - Per-user/IP rate limiting and caching are explicitly deferred until the
   service is otherwise stable; socket connects/messages and attachment grant
   endpoints therefore still have no abuse-rate controls.
@@ -477,9 +512,10 @@ Before treating the service as internet-production-ready, explicitly review:
 - Core gRPC transport remains plaintext pending the deferred TLS/mTLS decision.
 - Staging CI/CD quality gates and rollback semantics are explicitly deferred.
 - The hub is in-memory and process-local.
-- Query-string JWT transport can leak through careless proxy/access logging.
+- WebSocket tickets are process-local; horizontal scaling needs shared one-time
+  ticket state or same-instance routing.
 - Attachment content is not signature-validated or malware-scanned.
-- Production GCP configuration is unimplemented.
+- The general production configuration loader remains unimplemented.
 - Notification delivery remains best effort by explicit open decision; see the
   production-readiness decisions above before changing that contract.
 
