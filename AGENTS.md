@@ -325,6 +325,11 @@ must still retain its own authorization and lifecycle ownership.
 
 ## HTTP API
 
+Unauthenticated service-status routes:
+
+- `GET /health` (liveness only)
+- `GET /ready` (HTTP 200 only when not draining and MongoDB primary ping succeeds)
+
 Authenticated REST routes use bearer JWT middleware:
 
 - `POST /ws/ticket` (Bearer Core access JWT -> one-time WebSocket ticket)
@@ -407,11 +412,13 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   caller deadline. `grpc.NewClient` remains lazy and is not treated as a Core
   health check; request-time calls are bounded rather than allowed to hang on
   transport/connectivity behavior.
-- **Core gRPC transport security — deferred.** Chat still uses plaintext gRPC
-  transport to Core. This is acceptable for staging only when the traffic stays
-  on the intended private network and security-group boundary. Revisit TLS/mTLS
-  when the deployment topology is finalized; do not silently expose this hop to
-  an untrusted network.
+- **Core gRPC transport security — staging decision resolved; production boundary open.**
+  In staging, Core and Chat run on the same EC2 instance, so plaintext gRPC over
+  the host-local/private path is intentional and does not require TLS. If a future
+  production topology places Core and Chat on different hosts, VPCs, providers,
+  or clouds, treat that hop as crossing a trust boundary and require TLS; prefer
+  mTLS when service-to-service identity is needed. Do not carry the staging
+  plaintext assumption into a cross-host or cross-cloud production deployment.
 - **HTTP edge hardening — implemented.** The HTTP server uses a 5-second
   `ReadHeaderTimeout`, a 60-second keep-alive `IdleTimeout`, and a 64 KiB maximum
   header size. Request handlers are wrapped in structured panic recovery that
@@ -419,18 +426,27 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   started. Do not set global `ReadTimeout`/`WriteTimeout` merely to satisfy a
   generic checklist: long-lived WebSocket upgrades have their own read/write
   deadlines and liveness handling. Rate limiting is a separate deferred item.
-- **Readiness endpoint — deferred.** `/health` remains a simple liveness check.
-  A separate readiness contract for MongoDB/Core/other required dependencies
-  will be designed later instead of making liveness depend on downstream health.
+- **Readiness endpoint — implemented.** `/health` remains a pure liveness check.
+  `/ready` is unauthenticated and returns HTTP 200 only while Chat is accepting
+  work and MongoDB answers a primary ping within 2 seconds. Chat marks readiness
+  unavailable before graceful shutdown begins, so `/ready` returns HTTP 503 while
+  the process is draining. Do not include Core, SQS, R2, or the OpenTelemetry
+  collector in readiness: Core failures are bounded at request time, SQS
+  notification delivery is explicitly best-effort, R2 is an auxiliary attachment
+  dependency, and telemetry must never determine whether Chat receives traffic.
 - **Staging logging — implemented.** `staging` and `production` use structured
   JSON logs at INFO level; `development` uses text logs at DEBUG level. Keep the
   environment string aligned with `config.EnvironmentStaging`; do not reintroduce
   the obsolete `stage` spelling.
 - **OpenTelemetry hardening — implemented.** OTLP remains the single traces and
-  metrics export path. Telemetry initialization must establish a gRPC connection
-  to the configured collector within 5 seconds before it is considered ready;
-  startup remains non-blocking and retries every 30 seconds until shutdown if
-  the collector is unavailable. Root traces use parent-based ratio sampling via
+  metrics export path. `OTEL_COLLECTOR_ADDR` remains environment-controlled: local
+  Docker may use `otel-collector:4317`, while same-host staging may use
+  `localhost:4317`. Do not move this non-secret address into SSM merely for
+  configuration storage. Telemetry initialization must establish a gRPC
+  connection to the configured collector within 5 seconds before it is considered
+  initialized; startup remains non-blocking and retries every 30 seconds until
+  shutdown if the collector is unavailable. Collector availability never gates
+  `/ready`. Root traces use parent-based ratio sampling via
   `OTEL_TRACE_SAMPLE_RATIO`: development defaults to `1.0`, staging to `0.25`,
   and explicit values must be between 0 and 1. The unused
   `METRICS_SERVER_PORT` setting was removed; do not add a second metrics server
@@ -497,9 +513,11 @@ Staging MongoDB must be Atlas/replica-set/mongos compatible. Standalone Mongo
 produces `Transaction numbers are only allowed on a replica set member or
 mongos` and cannot safely support attachment message commits.
 
-Core gRPC currently uses plaintext transport. It is acceptable only on a
-properly isolated private network/security group; otherwise add TLS/mTLS.
-External HTTP/WSS TLS is expected to terminate at trusted infrastructure.
+Core gRPC intentionally uses plaintext transport in staging because Core and
+Chat run on the same EC2 instance. If production separates them across hosts,
+VPCs, providers, or clouds, TLS becomes mandatory for that hop; prefer mTLS when
+service-to-service identity is required. External HTTP/WSS TLS is expected to
+terminate at trusted infrastructure.
 
 ## Known operational/security debt
 
@@ -508,8 +526,7 @@ Before treating the service as internet-production-ready, explicitly review:
 - Per-user/IP rate limiting and caching are explicitly deferred until the
   service is otherwise stable; socket connects/messages and attachment grant
   endpoints therefore still have no abuse-rate controls.
-- `/health` is liveness only; readiness is explicitly deferred.
-- Core gRPC transport remains plaintext pending the deferred TLS/mTLS decision.
+- Production Core gRPC TLS/mTLS remains topology-dependent; it becomes required if Core and Chat cross a host/VPC/cloud trust boundary.
 - Staging CI/CD quality gates and rollback semantics are explicitly deferred.
 - The hub is in-memory and process-local.
 - WebSocket tickets are process-local; horizontal scaling needs shared one-time

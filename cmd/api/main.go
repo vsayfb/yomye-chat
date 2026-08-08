@@ -23,6 +23,7 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
+	"github.com/vsayfb/gig-platform-chat-service/internal/readiness"
 	"github.com/vsayfb/gig-platform-chat-service/internal/ws"
 	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/awsclient"
@@ -160,6 +161,8 @@ func main() {
 	}
 
 	slog.InfoContext(ctx, "mongo connected")
+
+	readinessHandler := readiness.NewHandler(mongoClient)
 
 	grpcClient, err := grpcclient.NewGRPCConnection(cfg.UserServiceGRPCAddr)
 	if err != nil {
@@ -334,6 +337,8 @@ func main() {
 	r.Use(middleware.MetricsMiddleware)
 	r.Use(middleware.TracingMiddleware)
 
+	r.Get("/ready", readinessHandler.ServeHTTP)
+
 	authMiddleware := middleware.Auth(jwtSvc)
 	r.With(authMiddleware).Post("/ws/ticket", wsHandler.IssueTicket)
 	r.Get("/ws", wsHandler.ServeWS)
@@ -403,6 +408,8 @@ func main() {
 	case <-quit:
 		slog.Info("shutting down chat service")
 	}
+
+	readinessHandler.StartDraining()
 
 	shutdownCtx, cancel := context.WithTimeout(
 		context.Background(),
