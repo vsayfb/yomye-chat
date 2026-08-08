@@ -21,10 +21,22 @@ type Config struct {
 	OTelCollectorAddr    string
 	OTelTraceSampleRatio float64
 	WSAllowedOrigins     []string
+	RateLimits           RateLimitConfig
 
 	R2 R2Config
 
 	AWS AWSConfig
+}
+
+type RateLimitConfig struct {
+	HTTPReadPerMinute  int
+	HTTPReadBurst      int
+	HTTPWritePerMinute int
+	HTTPWriteBurst     int
+	WSTicketPerMinute  int
+	WSTicketBurst      int
+	WSMessagePerSecond int
+	WSMessageBurst     int
 }
 
 type AWSConfig struct {
@@ -73,4 +85,33 @@ func getEnv(key, defaultValue string) string {
 		return v
 	}
 	return defaultValue
+}
+
+func loadRateLimits() RateLimitConfig {
+	return RateLimitConfig{
+		HTTPReadPerMinute: mustParsePositiveInt(getEnv(
+			EnvRateLimitHTTPReadPerMinute, DefaultRateLimitHTTPReadPerMinute,
+		)),
+		HTTPReadBurst: mustParsePositiveInt(getEnv(
+			EnvRateLimitHTTPReadBurst, DefaultRateLimitHTTPReadBurst,
+		)),
+		HTTPWritePerMinute: mustParsePositiveInt(getEnv(
+			EnvRateLimitHTTPWritePerMinute, DefaultRateLimitHTTPWritePerMinute,
+		)),
+		HTTPWriteBurst: mustParsePositiveInt(getEnv(
+			EnvRateLimitHTTPWriteBurst, DefaultRateLimitHTTPWriteBurst,
+		)),
+		WSTicketPerMinute: mustParsePositiveInt(getEnv(
+			EnvRateLimitWSTicketPerMinute, DefaultRateLimitWSTicketPerMinute,
+		)),
+		WSTicketBurst: mustParsePositiveInt(getEnv(
+			EnvRateLimitWSTicketBurst, DefaultRateLimitWSTicketBurst,
+		)),
+		WSMessagePerSecond: mustParsePositiveInt(getEnv(
+			EnvRateLimitWSMessagePerSecond, DefaultRateLimitWSMessagePerSecond,
+		)),
+		WSMessageBurst: mustParsePositiveInt(getEnv(
+			EnvRateLimitWSMessageBurst, DefaultRateLimitWSMessageBurst,
+		)),
+	}
 }

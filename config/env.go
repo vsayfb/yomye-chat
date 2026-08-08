@@ -22,6 +22,7 @@ func loadEnv() (*Config, error) {
 			EnvOTelTraceSampleRatio,
 			DefaultDevelopmentTraceSampleRatio,
 		)),
+		RateLimits: loadRateLimits(),
 		R2: R2Config{
 			AccountID:       mustGetEnv(EnvR2AccountID),
 			AccessKeyID:     mustGetEnv(EnvR2AccessKeyID),

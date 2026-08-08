@@ -18,6 +18,7 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
 	"github.com/vsayfb/gig-platform-chat-service/internal/messagecontent"
+	"github.com/vsayfb/gig-platform-chat-service/internal/ratelimit"
 	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/dto"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/grpcclient"
@@ -67,6 +68,7 @@ type outgoingError struct {
 	ClientMessageID string `json:"client_message_id,omitempty"`
 	Code            string `json:"code"`
 	Message         string `json:"message"`
+	RetryAfterMS    int64  `json:"retry_after_ms,omitempty"`
 }
 
 type outgoingAccepted struct {
@@ -107,6 +109,7 @@ type WSHandler struct {
 	publisher       *mysqs.Publisher
 	allowAnyOrigin  bool
 	allowedOrigins  map[string]struct{}
+	messageLimiter  *ratelimit.Limiter
 	upgrader        websocket.Upgrader
 }
 
@@ -121,6 +124,7 @@ func NewWSHandler(
 	gigClient *grpcclient.GigClient,
 	allowAnyOrigin bool,
 	allowedOrigins []string,
+	messageLimiter *ratelimit.Limiter,
 ) *WSHandler {
 	handler := &WSHandler{
 		hub:             h,
@@ -133,6 +137,7 @@ func NewWSHandler(
 		gigClient:       gigClient,
 		allowAnyOrigin:  allowAnyOrigin,
 		allowedOrigins:  make(map[string]struct{}, len(allowedOrigins)),
+		messageLimiter:  messageLimiter,
 	}
 	for _, origin := range allowedOrigins {
 		handler.allowedOrigins[origin] = struct{}{}
@@ -331,6 +336,13 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 				slog.ErrorContext(ctx, "ws: read error", "userID", senderID, "err", err)
 			}
 			break
+		}
+
+		if h.messageLimiter != nil {
+			if allowed, retryAfter := h.messageLimiter.Allow(senderID); !allowed {
+				h.writeRateLimitError(client, retryAfter)
+				continue
+			}
 		}
 
 		var incoming incomingMessage
@@ -748,6 +760,13 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		if h.messageLimiter != nil {
+			if allowed, retryAfter := h.messageLimiter.Allow(sender.ID); !allowed {
+				h.writeRateLimitError(client, retryAfter)
+				continue
+			}
+		}
+
 		var incoming incomingMessage
 		if err := json.Unmarshal(raw, &incoming); err != nil {
 			h.writeClientError(client, "", "invalid_message", "Invalid message format.")
@@ -994,6 +1013,24 @@ func (h *WSHandler) writeClientError(
 		ClientMessageID: clientMessageID,
 		Code:            code,
 		Message:         message,
+	})
+	if err != nil {
+		return
+	}
+	_ = client.Send(payload)
+}
+
+func (h *WSHandler) writeRateLimitError(client *hub.Client, retryAfter time.Duration) {
+	retryAfterMS := int64((retryAfter + time.Millisecond - 1) / time.Millisecond)
+	if retryAfterMS < 1 {
+		retryAfterMS = 1
+	}
+
+	payload, err := json.Marshal(outgoingError{
+		Type:         "error",
+		Code:         "rate_limited",
+		Message:      "Message rate limit exceeded. Try again later.",
+		RetryAfterMS: retryAfterMS,
 	})
 	if err != nil {
 		return

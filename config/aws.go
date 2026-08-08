@@ -91,6 +91,7 @@ func loadAWS(ctx context.Context, environment string) (*Config, error) {
 			EnvOTelTraceSampleRatio,
 			DefaultStagingTraceSampleRatio,
 		)),
+		RateLimits: loadRateLimits(),
 	}, nil
 }
 
@@ -175,6 +176,14 @@ func loadParameters(ctx context.Context, client *ssm.Client, parameterPath strin
 
 func parameter(parameterPath, name string) string {
 	return parameterPath + name
+}
+
+func mustParsePositiveInt(s string) int {
+	value, err := strconv.Atoi(s)
+	if err != nil || value <= 0 {
+		panic(fmt.Sprintf("invalid positive integer %q", s))
+	}
+	return value
 }
 
 func mustParseDuration(s string) time.Duration {

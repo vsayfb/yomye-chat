@@ -199,7 +199,11 @@ Logic and validation failures are returned as structured WebSocket errors:
 ```
 
 Preserve stable error codes and human-readable messages. Invalid content must
-not be stored or broadcast.
+not be stored or broadcast. When the per-user message bucket is exhausted, return
+`code=rate_limited` with a positive `retry_after_ms`; this rejection happens before
+message validation/persistence and therefore has no `client_message_id` correlation.
+The client should pause outbound sends for at least that duration and then retry the
+same logical message with the same `client_message_id`.
 
 WebSocket client frames are capped at 64 KiB. Message content is capped at
 4,000 logical characters; valid mascot tokens count as one logical character.
@@ -348,6 +352,12 @@ Authenticated REST routes use bearer JWT middleware:
 
 Application and social inbox/history endpoints remain separate.
 
+Authenticated HTTP routes use process-local per-user rate limits. Reads share the
+HTTP-read bucket, state-changing routes share the HTTP-write bucket, and
+`POST /ws/ticket` has its own stricter bucket. HTTP 429 responses include
+`Retry-After` in whole seconds. `/health` and `/ready` are deliberately outside
+these buckets.
+
 Message-history pagination is ordered by `(sent_at DESC, _id DESC)`. The first
 page omits both cursor parameters. Every subsequent page must provide both
 `before` and `before_id`, copied from the last message on the previous page. A
@@ -435,7 +445,8 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   does not log panic values and does not overwrite a response that already
   started. Do not set global `ReadTimeout`/`WriteTimeout` merely to satisfy a
   generic checklist: long-lived WebSocket upgrades have their own read/write
-  deadlines and liveness handling. Rate limiting is a separate deferred item.
+  deadlines and liveness handling. HTTP and WebSocket abuse limits are handled
+  separately by the process-local per-user rate-limit policy below.
 - **Readiness endpoint — implemented.** `/health` remains a pure liveness check.
   `/ready` is unauthenticated and returns HTTP 200 only while Chat is accepting
   work and MongoDB answers a primary ping within 2 seconds. Chat marks readiness
@@ -480,11 +491,25 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   envelopes. Use mocks/fakes only at the unit boundary; do not use a unit fake to
   claim a MongoDB/protocol/concurrency guarantee. Run `make test-unit`; use
   `make test-unit-race` for concurrency-sensitive package changes.
-- **Rate limiting and caching — deferred until stabilization.** Do not add
-  per-user/IP WebSocket, message, attachment-authorization, confirmation, or
-  download rate limits yet, and do not introduce caching merely as premature
-  optimization. Revisit both after the service behavior and deployment are in a
-  good/stable stage, with abuse limits designed around actual traffic.
+- **Process-local rate limiting — implemented; caching remains deferred.** Chat
+  uses independent in-memory token buckets keyed by authenticated Core user ID.
+  Defaults are HTTP reads `300/min` burst `60`, HTTP writes `60/min` burst `15`,
+  WebSocket ticket creation `20/min` burst `5`, and inbound WebSocket messages
+  `5/sec` burst `10`. Authenticated reads are intentionally limited as well as
+  writes because inbox/history/download handlers can create meaningful Mongo/R2
+  work when polled aggressively. `/health` and `/ready` are never rate limited.
+  HTTP 429 responses include `Retry-After`; WebSocket throttling returns stable
+  error code `rate_limited` with `retry_after_ms`, and a rejected frame must not
+  reach validation, persistence, broadcast, or notification work. Buckets are
+  independent by category and user, and inactive keys are lazily evicted. Limits
+  can be overridden with the `RATE_LIMIT_*` environment variables documented in
+  `.env.example`; they are defaults/runtime tuning, not SSM secrets. This policy
+  is intentionally per-process while Chat is single-instance. Before horizontal
+  scaling, choose a shared enforcement mechanism or move the relevant limit to a
+  trusted ingress layer. Do not add an application-level IP limiter until proxy
+  trust/client-IP extraction is explicitly defined; invalid-token/volumetric IP
+  abuse belongs at ingress. Caching is still deferred until there is evidence it
+  is needed.
 - **Staging CI/CD hardening — deferred.** Test/lint/race gates, deployment
   atomicity, health verification, and rollback behavior will be reviewed later.
 - **Production configuration path — deferred.** The general production loader
@@ -500,9 +525,10 @@ Configuration modes currently are:
 
 - `development`: environment variables via `config/env.go`.
 - `staging`: AWS default credential chain plus SSM parameters under the
-  hard-coded `/yevmiye/staging/` prefix. OTel collector address remains an
-  environment setting and trace sampling defaults to 25% unless
-  `OTEL_TRACE_SAMPLE_RATIO` overrides it.
+  hard-coded `/yevmiye/staging/` prefix. OTel collector address and rate-limit
+  tuning remain ordinary environment settings; trace sampling defaults to 25%
+  unless `OTEL_TRACE_SAMPLE_RATIO` overrides it. Rate-limit defaults require no
+  staging configuration and should not be moved into SSM merely for storage.
 - `production`: the general production loader is still deferred/unimplemented.
   The WebSocket-origin source is nevertheless decided: use the AWS SSM
   `/yevmiye/production/ws-allowed-origins` parameter when that loader is enabled.
@@ -552,9 +578,10 @@ terminate at trusted infrastructure.
 
 Before treating the service as internet-production-ready, explicitly review:
 
-- Per-user/IP rate limiting and caching are explicitly deferred until the
-  service is otherwise stable; socket connects/messages and attachment grant
-  endpoints therefore still have no abuse-rate controls.
+- Rate limiting is process-local and per authenticated user; it is not a
+  distributed quota and does not protect invalid-token traffic before identity is
+  established. Horizontal scaling or ingress-level IP abuse protection requires a
+  separate design. Caching remains intentionally deferred.
 - Production Core gRPC TLS/mTLS remains topology-dependent; it becomes required if Core and Chat cross a host/VPC/cloud trust boundary.
 - Staging CI/CD quality gates and rollback semantics are explicitly deferred.
 - The hub is in-memory and process-local.

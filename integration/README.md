@@ -79,6 +79,9 @@ about only after deployment:
 - SQS notification failure does not roll back an acknowledged durable message
 - `/ready` depends on MongoDB and draining state, not auxiliary dependencies
 - hub shutdown closes active WebSockets and drains registered handlers
+- per-user ticket, HTTP read/write, and WebSocket message rate-limit isolation
+- rate-limited WebSocket frames are rejected before persistence
+- `/ready` remains outside application rate limits
 
 Every persistence-sensitive test checks MongoDB state directly. A successful HTTP
 or WebSocket response alone is not considered evidence that a durability or

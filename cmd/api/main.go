@@ -23,6 +23,7 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
+	"github.com/vsayfb/gig-platform-chat-service/internal/ratelimit"
 	"github.com/vsayfb/gig-platform-chat-service/internal/readiness"
 	"github.com/vsayfb/gig-platform-chat-service/internal/ws"
 	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
@@ -264,6 +265,19 @@ func main() {
 		cfg.AWS.SQSNotificationQueueURL,
 	)
 
+	httpReadLimiter := ratelimit.New(
+		cfg.RateLimits.HTTPReadPerMinute, time.Minute, cfg.RateLimits.HTTPReadBurst,
+	)
+	httpWriteLimiter := ratelimit.New(
+		cfg.RateLimits.HTTPWritePerMinute, time.Minute, cfg.RateLimits.HTTPWriteBurst,
+	)
+	wsTicketLimiter := ratelimit.New(
+		cfg.RateLimits.WSTicketPerMinute, time.Minute, cfg.RateLimits.WSTicketBurst,
+	)
+	wsMessageLimiter := ratelimit.New(
+		cfg.RateLimits.WSMessagePerSecond, time.Second, cfg.RateLimits.WSMessageBurst,
+	)
+
 	ticketStore := wsticket.NewStore(wsticket.DefaultTTL)
 	wsHandler := ws.NewWSHandler(
 		h,
@@ -276,6 +290,7 @@ func main() {
 		gigClient,
 		cfg.AppEnv == config.EnvironmentDevelopment,
 		cfg.WSAllowedOrigins,
+		wsMessageLimiter,
 	)
 
 	telemetryCtx, telemetryCancel := context.WithCancel(ctx)
@@ -340,17 +355,22 @@ func main() {
 	r.Get("/ready", readinessHandler.ServeHTTP)
 
 	authMiddleware := middleware.Auth(jwtSvc)
-	r.With(authMiddleware).Post("/ws/ticket", wsHandler.IssueTicket)
+	httpReadRateLimit := middleware.RateLimitByUser(httpReadLimiter)
+	httpWriteRateLimit := middleware.RateLimitByUser(httpWriteLimiter)
+	wsTicketRateLimit := middleware.RateLimitByUser(wsTicketLimiter)
+
+	r.With(authMiddleware, wsTicketRateLimit).Post("/ws/ticket", wsHandler.IssueTicket)
 	r.Get("/ws", wsHandler.ServeWS)
 	r.Get("/ws/direct", wsHandler.ServeDirectWS)
 
 	r.Route("/applications", func(r chi.Router) {
-		r.With(authMiddleware).Get("/me", applicationHandler.ListApplications)
-		r.With(authMiddleware).Get("/{threadID}", applicationHandler.GetApplication)
-		r.With(authMiddleware).Get("/{threadID}/messages", applicationHandler.ListMessages)
-		r.With(authMiddleware).Post("/{threadID}/approve", applicationHandler.ApproveApplication)
-		r.With(authMiddleware).Post("/{threadID}/reject", applicationHandler.RejectApplication)
-		r.With(authMiddleware).Post(
+		r.Use(authMiddleware)
+		r.With(httpReadRateLimit).Get("/me", applicationHandler.ListApplications)
+		r.With(httpReadRateLimit).Get("/{threadID}", applicationHandler.GetApplication)
+		r.With(httpReadRateLimit).Get("/{threadID}/messages", applicationHandler.ListMessages)
+		r.With(httpWriteRateLimit).Post("/{threadID}/approve", applicationHandler.ApproveApplication)
+		r.With(httpWriteRateLimit).Post("/{threadID}/reject", applicationHandler.RejectApplication)
+		r.With(httpWriteRateLimit).Post(
 			"/{threadID}/attachments/uploads",
 			attachmentHandler.AuthorizeApplicationUpload,
 		)
@@ -358,10 +378,10 @@ func main() {
 
 	r.Route("/conversations", func(r chi.Router) {
 		r.Use(authMiddleware)
-		r.Get("/me", conversationHandler.List)
-		r.Get("/{conversationID}", conversationHandler.Get)
-		r.Get("/{conversationID}/messages", conversationHandler.ListMessages)
-		r.Post(
+		r.With(httpReadRateLimit).Get("/me", conversationHandler.List)
+		r.With(httpReadRateLimit).Get("/{conversationID}", conversationHandler.Get)
+		r.With(httpReadRateLimit).Get("/{conversationID}/messages", conversationHandler.ListMessages)
+		r.With(httpWriteRateLimit).Post(
 			"/{conversationID}/attachments/uploads",
 			attachmentHandler.AuthorizeDirectUpload,
 		)
@@ -369,8 +389,8 @@ func main() {
 
 	r.Route("/attachments", func(r chi.Router) {
 		r.Use(authMiddleware)
-		r.Post("/{attachmentID}/confirm", attachmentHandler.Confirm)
-		r.Get("/{attachmentID}/download", attachmentHandler.Download)
+		r.With(httpWriteRateLimit).Post("/{attachmentID}/confirm", attachmentHandler.Confirm)
+		r.With(httpReadRateLimit).Get("/{attachmentID}/download", attachmentHandler.Download)
 	})
 
 	cleanupCtx, cleanupCancel := context.WithCancel(ctx)

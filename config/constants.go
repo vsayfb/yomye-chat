@@ -28,6 +28,15 @@ const (
 	EnvR2ObjectPrefix      = "R2_OBJECT_PREFIX"
 	EnvR2UploadURLExpiry   = "R2_UPLOAD_URL_EXPIRY"
 	EnvR2DownloadURLExpiry = "R2_DOWNLOAD_URL_EXPIRY"
+
+	EnvRateLimitHTTPReadPerMinute  = "RATE_LIMIT_HTTP_READ_PER_MINUTE"
+	EnvRateLimitHTTPReadBurst      = "RATE_LIMIT_HTTP_READ_BURST"
+	EnvRateLimitHTTPWritePerMinute = "RATE_LIMIT_HTTP_WRITE_PER_MINUTE"
+	EnvRateLimitHTTPWriteBurst     = "RATE_LIMIT_HTTP_WRITE_BURST"
+	EnvRateLimitWSTicketPerMinute  = "RATE_LIMIT_WS_TICKET_PER_MINUTE"
+	EnvRateLimitWSTicketBurst      = "RATE_LIMIT_WS_TICKET_BURST"
+	EnvRateLimitWSMessagePerSecond = "RATE_LIMIT_WS_MESSAGE_PER_SECOND"
+	EnvRateLimitWSMessageBurst     = "RATE_LIMIT_WS_MESSAGE_BURST"
 )
 
 const (
@@ -43,4 +52,13 @@ const (
 	DefaultR2ObjectPrefix       = "chat"
 	DefaultR2UploadURLExpiry    = "10m"
 	DefaultR2DownloadURLExpiry  = "5m"
+
+	DefaultRateLimitHTTPReadPerMinute  = "300"
+	DefaultRateLimitHTTPReadBurst      = "60"
+	DefaultRateLimitHTTPWritePerMinute = "60"
+	DefaultRateLimitHTTPWriteBurst     = "15"
+	DefaultRateLimitWSTicketPerMinute  = "20"
+	DefaultRateLimitWSTicketBurst      = "5"
+	DefaultRateLimitWSMessagePerSecond = "5"
+	DefaultRateLimitWSMessageBurst     = "10"
 )

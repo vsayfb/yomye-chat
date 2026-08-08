@@ -33,10 +33,12 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protowire"
 
+	"github.com/vsayfb/gig-platform-chat-service/config"
 	"github.com/vsayfb/gig-platform-chat-service/hub"
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
+	"github.com/vsayfb/gig-platform-chat-service/internal/ratelimit"
 	"github.com/vsayfb/gig-platform-chat-service/internal/readiness"
 	"github.com/vsayfb/gig-platform-chat-service/internal/ws"
 	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
@@ -60,6 +62,7 @@ type testEnvOptions struct {
 	ticketTTL      time.Duration
 	core           *coreBehavior
 	sqsStatus      int
+	rateLimits     *config.RateLimitConfig
 }
 
 type testEnv struct {
@@ -105,6 +108,14 @@ func newTestEnv(t *testing.T, options testEnvOptions) *testEnv {
 	}
 	if options.sqsStatus == 0 {
 		options.sqsStatus = http.StatusOK
+	}
+	if options.rateLimits == nil {
+		options.rateLimits = &config.RateLimitConfig{
+			HTTPReadPerMinute: 300, HTTPReadBurst: 60,
+			HTTPWritePerMinute: 60, HTTPWriteBurst: 15,
+			WSTicketPerMinute: 20, WSTicketBurst: 5,
+			WSMessagePerSecond: 5, WSMessageBurst: 10,
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -161,6 +172,19 @@ func newTestEnv(t *testing.T, options testEnvOptions) *testEnv {
 	env.sqsServer = sqsServer
 	env.sqsRequests = sqsRequests
 
+	httpReadLimiter := ratelimit.New(
+		options.rateLimits.HTTPReadPerMinute, time.Minute, options.rateLimits.HTTPReadBurst,
+	)
+	httpWriteLimiter := ratelimit.New(
+		options.rateLimits.HTTPWritePerMinute, time.Minute, options.rateLimits.HTTPWriteBurst,
+	)
+	wsTicketLimiter := ratelimit.New(
+		options.rateLimits.WSTicketPerMinute, time.Minute, options.rateLimits.WSTicketBurst,
+	)
+	wsMessageLimiter := ratelimit.New(
+		options.rateLimits.WSMessagePerSecond, time.Second, options.rateLimits.WSMessageBurst,
+	)
+
 	env.wsHandler = ws.NewWSHandler(
 		env.hub,
 		env.tickets,
@@ -172,6 +196,7 @@ func newTestEnv(t *testing.T, options testEnvOptions) *testEnv {
 		gigClient,
 		options.allowAnyOrigin,
 		options.allowedOrigins,
+		wsMessageLimiter,
 	)
 	env.ready = readiness.NewHandler(mongoClient)
 
@@ -183,21 +208,24 @@ func newTestEnv(t *testing.T, options testEnvOptions) *testEnv {
 	router.Get("/ready", env.ready.ServeHTTP)
 
 	auth := middleware.Auth(env.jwtSvc)
-	router.With(auth).Post("/ws/ticket", env.wsHandler.IssueTicket)
+	readRateLimit := middleware.RateLimitByUser(httpReadLimiter)
+	writeRateLimit := middleware.RateLimitByUser(httpWriteLimiter)
+	ticketRateLimit := middleware.RateLimitByUser(wsTicketLimiter)
+	router.With(auth, ticketRateLimit).Post("/ws/ticket", env.wsHandler.IssueTicket)
 	router.Get("/ws", env.wsHandler.ServeWS)
 	router.Get("/ws/direct", env.wsHandler.ServeDirectWS)
 
 	router.Route("/applications", func(r chi.Router) {
 		r.Use(auth)
-		r.Get("/{threadID}", appHandler.GetApplication)
-		r.Get("/{threadID}/messages", appHandler.ListMessages)
-		r.Post("/{threadID}/approve", appHandler.ApproveApplication)
-		r.Post("/{threadID}/reject", appHandler.RejectApplication)
+		r.With(readRateLimit).Get("/{threadID}", appHandler.GetApplication)
+		r.With(readRateLimit).Get("/{threadID}/messages", appHandler.ListMessages)
+		r.With(writeRateLimit).Post("/{threadID}/approve", appHandler.ApproveApplication)
+		r.With(writeRateLimit).Post("/{threadID}/reject", appHandler.RejectApplication)
 	})
 	router.Route("/conversations", func(r chi.Router) {
 		r.Use(auth)
-		r.Get("/{conversationID}", convHandler.Get)
-		r.Get("/{conversationID}/messages", convHandler.ListMessages)
+		r.With(readRateLimit).Get("/{conversationID}", convHandler.Get)
+		r.With(readRateLimit).Get("/{conversationID}/messages", convHandler.ListMessages)
 	})
 
 	env.server = httptest.NewServer(router)
@@ -409,6 +437,7 @@ type wsError struct {
 	ClientMessageID string `json:"client_message_id"`
 	Code            string `json:"code"`
 	Message         string `json:"message"`
+	RetryAfterMS    int64  `json:"retry_after_ms"`
 }
 
 type deliveredDirectMessage struct {
