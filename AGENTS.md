@@ -77,8 +77,16 @@ must check current conversation participation itself.
 
 ## Authentication and WebSocket lifetime
 
-Core issues access and refresh tokens. Chat verifies only the access JWT with
-the shared JWT secret. It does not refresh tokens.
+Core access tokens are signed JWTs. Chat accepts a token only when all of the
+following are true: `alg == HS256`, `iss == yevmiye-core`, `token_use == access`,
+the signature validates with Core's configured access-token secret, `exp` is
+present and valid, and `sub` is a non-nil valid UUID. Chat does not refresh
+tokens.
+
+Core refresh tokens are deliberately outside this JWT contract: they are opaque
+64-character random hexadecimal values, and Core stores only their SHA-256
+hashes. A genuine Core refresh token therefore cannot be mistaken for a Chat
+access token because it is not JWT-shaped or signed.
 
 WebSocket connections currently receive the access token as the `token` query
 parameter. After verification, Chat derives the connection deadline from the
@@ -319,11 +327,12 @@ same MongoDB timestamp and would otherwise be skipped at page boundaries.
 The following decisions correspond to the August 2026 production-readiness
 review. Preserve these statuses unless the maintainer explicitly revisits them.
 
-- **JWT access-token discrimination — deferred.** Chat currently validates the
-  signed JWT and expiry but does not yet enforce an issuer/audience/token-type
-  claim that independently distinguishes Core access tokens from refresh
-  tokens. Do not invent a claim contract in Chat. Revisit this after confirming
-  Core's authoritative token claims.
+- **JWT access-token contract — implemented.** Chat accepts only Core access
+  JWTs that use HS256, declare `iss=yevmiye-core` and `token_use=access`, validate
+  with Core's configured access-token secret, contain a valid non-expired `exp`,
+  and use a non-nil UUID in `sub`. Core refresh tokens remain opaque 64-character
+  hexadecimal values whose SHA-256 hashes are stored by Core, so they cannot be
+  parsed as access JWTs. Keep Chat's verifier aligned with this Core contract.
 - **Durable notification outbox — accepted open decision.** Message persistence
   remains authoritative and SQS notification publishing remains best effort
   after the message is durable. An SQS failure must not make the client retry a
@@ -357,6 +366,44 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   caller deadline. `grpc.NewClient` remains lazy and is not treated as a Core
   health check; request-time calls are bounded rather than allowed to hang on
   transport/connectivity behavior.
+- **Core gRPC transport security — deferred.** Chat still uses plaintext gRPC
+  transport to Core. This is acceptable for staging only when the traffic stays
+  on the intended private network and security-group boundary. Revisit TLS/mTLS
+  when the deployment topology is finalized; do not silently expose this hop to
+  an untrusted network.
+- **HTTP edge hardening — implemented.** The HTTP server uses a 5-second
+  `ReadHeaderTimeout`, a 60-second keep-alive `IdleTimeout`, and a 64 KiB maximum
+  header size. Request handlers are wrapped in structured panic recovery that
+  does not log panic values and does not overwrite a response that already
+  started. Do not set global `ReadTimeout`/`WriteTimeout` merely to satisfy a
+  generic checklist: long-lived WebSocket upgrades have their own read/write
+  deadlines and liveness handling. Rate limiting is a separate deferred item.
+- **Readiness endpoint — deferred.** `/health` remains a simple liveness check.
+  A separate readiness contract for MongoDB/Core/other required dependencies
+  will be designed later instead of making liveness depend on downstream health.
+- **Staging logging — implemented.** `staging` and `production` use structured
+  JSON logs at INFO level; `development` uses text logs at DEBUG level. Keep the
+  environment string aligned with `config.EnvironmentStaging`; do not reintroduce
+  the obsolete `stage` spelling.
+- **OpenTelemetry hardening — implemented.** OTLP remains the single traces and
+  metrics export path. Telemetry initialization must establish a gRPC connection
+  to the configured collector within 5 seconds before it is considered ready;
+  startup remains non-blocking and retries every 30 seconds until shutdown if
+  the collector is unavailable. Root traces use parent-based ratio sampling via
+  `OTEL_TRACE_SAMPLE_RATIO`: development defaults to `1.0`, staging to `0.25`,
+  and explicit values must be between 0 and 1. The unused
+  `METRICS_SERVER_PORT` setting was removed; do not add a second metrics server
+  unless the observability architecture intentionally changes.
+- **Rate limiting and caching — deferred until stabilization.** Do not add
+  per-user/IP WebSocket, message, attachment-authorization, confirmation, or
+  download rate limits yet, and do not introduce caching merely as premature
+  optimization. Revisit both after the service behavior and deployment are in a
+  good/stable stage, with abuse limits designed around actual traffic.
+- **Staging CI/CD hardening — deferred.** Test/lint/race gates, deployment
+  atomicity, health verification, and rollback behavior will be reviewed later.
+- **Production configuration path — deferred.** `loadGCP` remains unimplemented
+  and production mode is still a blocker. Do not claim the service supports the
+  production environment until this path is intentionally designed and tested.
 
 ## Configuration and deployment
 
@@ -364,7 +411,9 @@ Configuration modes currently are:
 
 - `development`: environment variables via `config/env.go`.
 - `staging`: AWS default credential chain plus SSM parameters under the
-  hard-coded `/yevmiye/staging/` prefix.
+  hard-coded `/yevmiye/staging/` prefix. OTel collector address remains an
+  environment setting and trace sampling defaults to 25% unless
+  `OTEL_TRACE_SAMPLE_RATIO` overrides it.
 - `production`: `loadGCP`, which currently returns `nil, nil` and is not
   production-ready. Treat this as a blocker, not a harmless placeholder.
 
@@ -408,8 +457,12 @@ External HTTP/WSS TLS is expected to terminate at trusted infrastructure.
 Before treating the service as internet-production-ready, explicitly review:
 
 - WebSocket `CheckOrigin` currently allows all origins.
-- No visible per-user/IP rate limiting for socket connects, messages, upload
-  authorizations, confirmations, or download authorizations.
+- Per-user/IP rate limiting and caching are explicitly deferred until the
+  service is otherwise stable; socket connects/messages and attachment grant
+  endpoints therefore still have no abuse-rate controls.
+- `/health` is liveness only; readiness is explicitly deferred.
+- Core gRPC transport remains plaintext pending the deferred TLS/mTLS decision.
+- Staging CI/CD quality gates and rollback semantics are explicitly deferred.
 - The hub is in-memory and process-local.
 - Query-string JWT transport can leak through careless proxy/access logging.
 - Attachment content is not signature-validated or malware-scanned.
@@ -418,8 +471,6 @@ Before treating the service as internet-production-ready, explicitly review:
   production-readiness decisions above before changing that contract.
 - `client_message_id` durable idempotency is explicitly deferred; client retries
   can still create duplicates.
-- JWT access-token discrimination beyond signature/expiry is explicitly deferred
-  until Core's token claim contract is confirmed.
 
 Do not silently expand scope while fixing these. State the threat/trade-off,
 make the smallest safe change, preserve compatibility where possible, and add
