@@ -156,10 +156,18 @@ Client message:
 }
 ```
 
+`client_message_id` is required on every message send and must be 1-128 bytes.
+Clients must generate a fresh ID for each logical send and reuse that same ID
+only when retrying an uncertain send.
+
 After persistence, Chat sends the sender a `message.accepted` event containing
-the client ID, durable message ID, conversation/thread ID, and timestamp. This
-acknowledgement is the client's idempotency/reconciliation signal; it is not a
-database uniqueness guarantee for `client_message_id`.
+the client ID, durable message ID, conversation/thread ID, and timestamp. Chat
+persists `client_message_id` with the message and enforces uniqueness on
+`(sender_id, client_message_id)` within each message domain. If the same sender
+retries an already-persisted ID, Chat returns the original `message.accepted`
+result without creating, broadcasting, or notifying for a second message. This
+replay behavior also applies to attachment messages before attachment READY
+state is re-evaluated.
 
 Logic and validation failures are returned as structured WebSocket errors:
 
@@ -339,9 +347,14 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   successfully stored message. This means an offline notification can be lost.
   That reliability trade-off is accepted for now; revisit an outbox/durable
   retry design before stronger production notification guarantees are required.
-- **Durable `client_message_id` idempotency — deferred.** The field remains a
-  correlation/acknowledgement identifier only. Database uniqueness and replay
-  handling will be designed later.
+- **Durable `client_message_id` idempotency — implemented.** Every WebSocket
+  message send requires a 1-128 byte client-generated ID. Chat stores that ID on
+  the durable message and has a unique `(sender_id, client_message_id)` index in
+  both application-message and direct-message collections. A retry returns the
+  originally persisted message/acknowledgement and does not re-broadcast or
+  publish another notification. Attachment retries are checked for replay before
+  READY -> ATTACHED validation, and transactional replay callbacks report that no
+  new message was created so attachments are not transitioned twice.
 - **WebSocket origin and query-string JWT transport — deferred.** The current
   browser-origin policy and `?token=` transport remain unchanged until the
   staging proxy/browser/native-client topology is known. Never log the query
@@ -469,8 +482,6 @@ Before treating the service as internet-production-ready, explicitly review:
 - Production GCP configuration is unimplemented.
 - Notification delivery remains best effort by explicit open decision; see the
   production-readiness decisions above before changing that contract.
-- `client_message_id` durable idempotency is explicitly deferred; client retries
-  can still create duplicates.
 
 Do not silently expand scope while fixing these. State the threat/trade-off,
 make the smallest safe change, preserve compatibility where possible, and add

@@ -169,3 +169,20 @@ func TestValidateMessageContentStillValidatesMascotTokens(t *testing.T) {
 		t.Fatalf("invalid mascot code = %q, want invalid_emoji", code)
 	}
 }
+
+func TestValidateClientMessageID(t *testing.T) {
+	t.Parallel()
+
+	if code, _, ok := validateClientMessageID("client-123"); !ok || code != "" {
+		t.Fatalf("valid client_message_id rejected: code=%q ok=%v", code, ok)
+	}
+
+	if code, _, ok := validateClientMessageID(""); ok || code != "invalid_client_message_id" {
+		t.Fatalf("empty client_message_id: code=%q ok=%v", code, ok)
+	}
+
+	tooLong := strings.Repeat("a", maxClientMessageIDLength+1)
+	if code, _, ok := validateClientMessageID(tooLong); ok || code != "invalid_client_message_id" {
+		t.Fatalf("oversized client_message_id: code=%q ok=%v", code, ok)
+	}
+}

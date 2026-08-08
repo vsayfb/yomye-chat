@@ -47,8 +47,9 @@ type ApplicationDetails struct {
 type Message struct {
 	ID bson.ObjectID `bson:"_id,omitempty" json:"id"`
 
-	ThreadID bson.ObjectID `bson:"thread_id" json:"thread_id"`
-	SenderID string        `bson:"sender_id" json:"sender_id"`
+	ThreadID        bson.ObjectID `bson:"thread_id" json:"thread_id"`
+	SenderID        string        `bson:"sender_id" json:"sender_id"`
+	ClientMessageID string        `bson:"client_message_id" json:"-"`
 
 	Content     string           `bson:"content" json:"content"`
 	Attachments []attachment.Ref `bson:"attachments,omitempty" json:"attachments,omitempty"`

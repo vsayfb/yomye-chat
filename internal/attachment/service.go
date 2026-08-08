@@ -232,18 +232,20 @@ func (s *Service) Download(
 }
 
 // CommitMessage runs message creation and READY -> ATTACHED transitions in one
-// MongoDB transaction. The callback may be retried by the driver and therefore
-// must contain database operations only.
+// MongoDB transaction. The callback returns whether it created a new durable
+// message. An idempotent replay returns created=false so already-attached media
+// is not transitioned a second time. The callback may be retried by the driver
+// and therefore must contain database operations only.
 func (s *Service) CommitMessage(
 	ctx context.Context,
 	scope Scope,
 	scopeID bson.ObjectID,
 	uploaderID string,
 	ids []bson.ObjectID,
-	create func(context.Context, []Ref) (bson.ObjectID, error),
+	create func(context.Context, []Ref) (bson.ObjectID, bool, error),
 ) error {
 	if len(ids) == 0 {
-		_, err := create(ctx, nil)
+		_, _, err := create(ctx, nil)
 		return err
 	}
 	if len(ids) > MaxPerMessage {
@@ -284,9 +286,12 @@ func (s *Service) CommitMessage(
 			refs = append(refs, ref)
 		}
 
-		messageID, err := create(txCtx, refs)
+		messageID, created, err := create(txCtx, refs)
 		if err != nil {
 			return nil, err
+		}
+		if !created {
+			return messageID, nil
 		}
 		count, err := s.repo.MarkAttached(
 			txCtx, ids, scope, scopeID, uploaderID, messageID, now,

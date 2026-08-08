@@ -34,11 +34,12 @@ var upgrader = websocket.Upgrader{
 }
 
 const (
-	closeAccessTokenExpired = 4001
-	closeReasonTokenExpired = "access_token_expired"
-	channelApplication      = "application"
-	channelDirect           = "direct"
-	maxMessageLogicalLength = 4000
+	closeAccessTokenExpired  = 4001
+	closeReasonTokenExpired  = "access_token_expired"
+	channelApplication       = "application"
+	channelDirect            = "direct"
+	maxMessageLogicalLength  = 4000
+	maxClientMessageIDLength = 128
 )
 
 // incomingMessage is what the client sends over WebSocket.
@@ -81,6 +82,14 @@ type outgoingAccepted struct {
 	ThreadID        string `json:"thread_id,omitempty"`
 	ConversationID  string `json:"conversation_id,omitempty"`
 	SentAt          string `json:"sent_at"`
+}
+
+func validateClientMessageID(clientMessageID string) (code string, message string, ok bool) {
+	if clientMessageID == "" || len(clientMessageID) > maxClientMessageIDLength {
+		return "invalid_client_message_id",
+			"client_message_id is required and must be at most 128 bytes.", false
+	}
+	return "", "", true
 }
 
 func validateMessageContent(content string) (code string, message string, ok bool) {
@@ -254,6 +263,10 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(raw, &incoming); err != nil {
 			slog.WarnContext(ctx, "ws: invalid message format", "userID", senderID)
 			h.writeClientError(client, "", "invalid_message", "Invalid message format.")
+			continue
+		}
+		if code, message, ok := validateClientMessageID(incoming.ClientMessageID); !ok {
+			h.writeClientError(client, incoming.ClientMessageID, code, message)
 			continue
 		}
 
@@ -441,6 +454,26 @@ func (h *WSHandler) handleMessage(
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	existing, err := h.applicationSvc.FindMessageByClientMessageID(
+		ctx, sender.ID, clientMessageID,
+	)
+	if err != nil {
+		slog.ErrorContext(ctx, "ws: idempotency lookup failed",
+			"sender_id", sender.ID, "client_message_id", clientMessageID, "error", err)
+		h.writeClientError(client, clientMessageID, "internal_error", "Could not persist message.")
+		return
+	}
+	if existing != nil {
+		h.writeAccepted(client, outgoingAccepted{
+			Type:            "message.accepted",
+			ClientMessageID: clientMessageID,
+			MessageID:       existing.ID.Hex(),
+			ThreadID:        existing.ThreadID.Hex(),
+			SentAt:          existing.SentAt.Format(time.RFC3339),
+		})
+		return
+	}
+
 	if len(attachmentIDs) > 0 && threadID.IsZero() {
 		h.writeClientError(
 			client, clientMessageID, "attachments_require_thread",
@@ -452,18 +485,19 @@ func (h *WSHandler) handleMessage(
 	var (
 		msg         *application.Message
 		isNewThread bool
+		replayed    bool
 	)
-	err := h.attachmentSvc.CommitMessage(
+	err = h.attachmentSvc.CommitMessage(
 		ctx, attachment.ScopeApplication, threadID, sender.ID, attachmentIDs,
-		func(txCtx context.Context, refs []attachment.Ref) (bson.ObjectID, error) {
+		func(txCtx context.Context, refs []attachment.Ref) (bson.ObjectID, bool, error) {
 			var sendErr error
-			msg, isNewThread, sendErr = h.applicationSvc.SendMessage(
-				txCtx, sender.ID, receiver.ID, gig.ID, content, refs,
+			msg, isNewThread, replayed, sendErr = h.applicationSvc.SendMessage(
+				txCtx, sender.ID, receiver.ID, gig.ID, clientMessageID, content, refs,
 			)
 			if sendErr != nil {
-				return bson.NilObjectID, sendErr
+				return bson.NilObjectID, false, sendErr
 			}
-			return msg.ID, nil
+			return msg.ID, !replayed, nil
 		},
 	)
 
@@ -492,6 +526,9 @@ func (h *WSHandler) handleMessage(
 		ThreadID:        msg.ThreadID.Hex(),
 		SentAt:          msg.SentAt.Format(time.RFC3339),
 	})
+	if replayed {
+		return
+	}
 
 	outgoing := outgoingMessage{
 		Type:        "message",
@@ -636,6 +673,10 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 			h.writeClientError(client, "", "invalid_message", "Invalid message format.")
 			continue
 		}
+		if code, message, ok := validateClientMessageID(incoming.ClientMessageID); !ok {
+			h.writeClientError(client, incoming.ClientMessageID, code, message)
+			continue
+		}
 		attachmentIDs, parseErr := parseAttachmentIDs(incoming.AttachmentIDs)
 		if parseErr != nil {
 			h.writeClientError(
@@ -758,6 +799,26 @@ func (h *WSHandler) handleDirectMessage(
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	existing, err := h.conversationSvc.FindMessageByClientMessageID(
+		ctx, sender.ID, clientMessageID,
+	)
+	if err != nil {
+		slog.ErrorContext(ctx, "ws: direct idempotency lookup failed",
+			"sender_id", sender.ID, "client_message_id", clientMessageID, "error", err)
+		h.writeClientError(client, clientMessageID, "internal_error", "Could not persist message.")
+		return
+	}
+	if existing != nil {
+		h.writeAccepted(client, outgoingAccepted{
+			Type:            "message.accepted",
+			ClientMessageID: clientMessageID,
+			MessageID:       existing.ID.Hex(),
+			ConversationID:  existing.ConversationID.Hex(),
+			SentAt:          existing.SentAt.Format(time.RFC3339),
+		})
+		return
+	}
+
 	if len(attachmentIDs) > 0 && conversationID.IsZero() {
 		h.writeClientError(
 			client, clientMessageID, "attachments_require_conversation",
@@ -766,18 +827,21 @@ func (h *WSHandler) handleDirectMessage(
 		return
 	}
 
-	var msg *conversation.Message
-	err := h.attachmentSvc.CommitMessage(
+	var (
+		msg      *conversation.Message
+		replayed bool
+	)
+	err = h.attachmentSvc.CommitMessage(
 		ctx, attachment.ScopeDirect, conversationID, sender.ID, attachmentIDs,
-		func(txCtx context.Context, refs []attachment.Ref) (bson.ObjectID, error) {
+		func(txCtx context.Context, refs []attachment.Ref) (bson.ObjectID, bool, error) {
 			var sendErr error
-			msg, _, sendErr = h.conversationSvc.SendDirectMessage(
-				txCtx, sender.ID, targetID, content, refs,
+			msg, _, replayed, sendErr = h.conversationSvc.SendDirectMessage(
+				txCtx, sender.ID, targetID, clientMessageID, content, refs,
 			)
 			if sendErr != nil {
-				return bson.NilObjectID, sendErr
+				return bson.NilObjectID, false, sendErr
 			}
-			return msg.ID, nil
+			return msg.ID, !replayed, nil
 		},
 	)
 	if err != nil {
@@ -799,6 +863,9 @@ func (h *WSHandler) handleDirectMessage(
 		ConversationID:  msg.ConversationID.Hex(),
 		SentAt:          msg.SentAt.Format(time.RFC3339),
 	})
+	if replayed {
+		return
+	}
 
 	outgoing := outgoingDirectMessage{
 		Type:           "message",

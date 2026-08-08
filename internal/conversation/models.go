@@ -47,11 +47,12 @@ type Conversation struct {
 type Message struct {
 	ID bson.ObjectID `bson:"_id,omitempty" json:"id"`
 
-	ConversationID bson.ObjectID    `bson:"conversation_id" json:"conversation_id"`
-	SenderID       string           `bson:"sender_id" json:"sender_id"`
-	Content        string           `bson:"content" json:"content"`
-	Attachments    []attachment.Ref `bson:"attachments,omitempty" json:"attachments,omitempty"`
-	SentAt         time.Time        `bson:"sent_at" json:"sent_at"`
+	ConversationID  bson.ObjectID    `bson:"conversation_id" json:"conversation_id"`
+	SenderID        string           `bson:"sender_id" json:"sender_id"`
+	ClientMessageID string           `bson:"client_message_id" json:"-"`
+	Content         string           `bson:"content" json:"content"`
+	Attachments     []attachment.Ref `bson:"attachments,omitempty" json:"attachments,omitempty"`
+	SentAt          time.Time        `bson:"sent_at" json:"sent_at"`
 }
 
 type Summary struct {

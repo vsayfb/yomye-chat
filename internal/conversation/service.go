@@ -36,13 +36,19 @@ type Service interface {
 		cursor *messagecursor.Cursor,
 	) ([]Message, error)
 	DirectConversationExists(ctx context.Context, userA, userB string) (bool, error)
+	FindMessageByClientMessageID(
+		ctx context.Context,
+		senderID string,
+		clientMessageID string,
+	) (*Message, error)
 	SendDirectMessage(
 		ctx context.Context,
 		senderID string,
 		targetID string,
+		clientMessageID string,
 		content string,
 		attachments []attachment.Ref,
-	) (*Message, bool, error)
+	) (*Message, bool, bool, error)
 }
 
 type service struct {
@@ -124,31 +130,48 @@ func (s *service) DirectConversationExists(
 	return true, nil
 }
 
+func (s *service) FindMessageByClientMessageID(
+	ctx context.Context,
+	senderID string,
+	clientMessageID string,
+) (*Message, error) {
+	return s.repo.FindMessageByClientMessageID(ctx, senderID, clientMessageID)
+}
+
 func (s *service) SendDirectMessage(
 	ctx context.Context,
 	senderID string,
 	targetID string,
+	clientMessageID string,
 	content string,
 	attachments []attachment.Ref,
-) (*Message, bool, error) {
+) (*Message, bool, bool, error) {
 	if senderID == "" || targetID == "" || senderID == targetID {
-		return nil, false, ErrInvalidDirectConversation
+		return nil, false, false, ErrInvalidDirectConversation
+	}
+
+	if existing, err := s.repo.FindMessageByClientMessageID(
+		ctx, senderID, clientMessageID,
+	); err != nil {
+		return nil, false, false, err
+	} else if existing != nil {
+		return existing, false, true, nil
 	}
 
 	key := directKey(senderID, targetID)
 	conversation, err := s.repo.FindDirectByKey(ctx, key)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	isNew := false
 	if conversation == nil {
 		allowed, err := s.policy.AllowsSocialDirectMessages(ctx, targetID)
 		if err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 		if !allowed {
-			return nil, false, ErrDirectMessagesDisabled
+			return nil, false, false, ErrDirectMessagesDisabled
 		}
 
 		now := time.Now().UTC()
@@ -168,13 +191,13 @@ func (s *service) SendDirectMessage(
 			if mongo.IsDuplicateKeyError(err) {
 				conversation, err = s.repo.FindDirectByKey(ctx, key)
 				if err != nil {
-					return nil, false, err
+					return nil, false, false, err
 				}
 				if conversation == nil {
-					return nil, false, ErrNotFound
+					return nil, false, false, ErrNotFound
 				}
 			} else {
-				return nil, false, err
+				return nil, false, false, err
 			}
 		} else {
 			isNew = true
@@ -184,25 +207,32 @@ func (s *service) SendDirectMessage(
 	if conversation.Type != TypeDirect ||
 		!isActiveMember(conversation, senderID) ||
 		!isActiveMember(conversation, targetID) {
-		return nil, false, ErrForbidden
+		return nil, false, false, ErrForbidden
 	}
 
 	msg := &Message{
-		ConversationID: conversation.ID,
-		SenderID:       senderID,
-		Content:        content,
-		Attachments:    attachments,
-		SentAt:         time.Now().UTC(),
+		ConversationID:  conversation.ID,
+		SenderID:        senderID,
+		ClientMessageID: clientMessageID,
+		Content:         content,
+		Attachments:     attachments,
+		SentAt:          time.Now().UTC(),
 	}
-	if err := s.repo.CreateMessage(ctx, msg); err != nil {
-		return nil, false, err
+	persisted, created, err := s.repo.CreateOrGetMessage(ctx, msg)
+	if err != nil {
+		return nil, false, false, err
+	}
+	if !created {
+		return persisted, false, true, nil
 	}
 
-	if err := s.repo.UpdateLastMessage(ctx, conversation.ID, content, msg.SentAt); err != nil {
+	if err := s.repo.UpdateLastMessage(
+		ctx, conversation.ID, content, persisted.SentAt,
+	); err != nil {
 		slog.ErrorContext(ctx, "failed to update direct conversation metadata",
 			"conversation_id", conversation.ID.Hex(), "error", err)
 	}
-	return msg, isNew, nil
+	return persisted, isNew, false, nil
 }
 
 func isActiveMember(conversation *Conversation, userID string) bool {

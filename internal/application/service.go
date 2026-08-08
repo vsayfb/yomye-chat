@@ -42,6 +42,11 @@ type Service interface {
 
 	// Messages
 	// GetMessages(ctx context.Context, threadID bson.ObjectID, cursor *Cursor) ([]Message, error)
+	FindMessageByClientMessageID(
+		ctx context.Context,
+		senderID string,
+		clientMessageID string,
+	) (*Message, error)
 
 	// SendMessage returns the persisted message and whether sending it
 	// created a brand-new thread (application) — i.e. this was the very
@@ -51,9 +56,10 @@ type Service interface {
 		senderID string,
 		targetID string,
 		gigID string,
+		clientMessageID string,
 		content string,
 		attachments []attachment.Ref,
-	) (msg *Message, isNewThread bool, err error)
+	) (msg *Message, isNewThread bool, replayed bool, err error)
 }
 
 type applicationService struct {
@@ -211,6 +217,14 @@ func (s *applicationService) ListMessages(
 	)
 }
 
+func (s *applicationService) FindMessageByClientMessageID(
+	ctx context.Context,
+	senderID string,
+	clientMessageID string,
+) (*Message, error) {
+	return s.repo.FindMessageByClientMessageID(ctx, senderID, clientMessageID)
+}
+
 // SendMessage sends a message within the context of an application.
 //
 // If no application exists between the sender and target for the specified gig,
@@ -241,9 +255,18 @@ func (s *applicationService) SendMessage(
 	senderID string,
 	targetID string,
 	gigID string,
+	clientMessageID string,
 	content string,
 	attachments []attachment.Ref,
-) (*Message, bool, error) {
+) (*Message, bool, bool, error) {
+
+	if existing, err := s.repo.FindMessageByClientMessageID(
+		ctx, senderID, clientMessageID,
+	); err != nil {
+		return nil, false, false, err
+	} else if existing != nil {
+		return existing, false, true, nil
+	}
 
 	app, err := s.repo.FindApplicationByParticipants(
 		ctx,
@@ -253,7 +276,7 @@ func (s *applicationService) SendMessage(
 	)
 
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	// First message creates the application.
@@ -272,12 +295,16 @@ func (s *applicationService) SendMessage(
 
 		if err := s.repo.CreateApplication(ctx, app); err != nil {
 			if mongo.IsDuplicateKeyError(err) {
-				return s.SendMessage(ctx, senderID, targetID, gigID, content, attachments)
+				return s.SendMessage(
+					ctx, senderID, targetID, gigID, clientMessageID, content, attachments,
+				)
 			}
-			return nil, false, err
+			return nil, false, false, err
 		}
 
-		msg, err := s.persistMessage(ctx, app.ID, senderID, content, attachments)
+		msg, replayed, err := s.persistMessage(
+			ctx, app.ID, senderID, clientMessageID, content, attachments,
+		)
 		if err != nil {
 			if cleanupErr := s.repo.DeleteApplication(ctx, app.ID); cleanupErr != nil {
 				slog.ErrorContext(ctx, "failed to clean up incomplete application",
@@ -285,39 +312,41 @@ func (s *applicationService) SendMessage(
 			}
 		}
 
-		return msg, true, err
+		return msg, !replayed, replayed, err
 	}
 
 	isInitiator := app.InitiatorID == senderID
 	isTarget := app.TargetID == senderID
 
 	if !isInitiator && !isTarget {
-		return nil, false, ErrForbidden
+		return nil, false, false, ErrForbidden
 	}
 
 	switch app.Status {
 
 	case ApplicationStatusPending:
 		if isInitiator {
-			return nil, false, ErrApplicationPending
+			return nil, false, false, ErrApplicationPending
 		}
 
 		// Target must approve before Applicationting.
-		return nil, false, ErrApplicationMustBeApproved
+		return nil, false, false, ErrApplicationMustBeApproved
 
 	case ApplicationStatusAccepted:
-		msg, err := s.persistMessage(ctx, app.ID, senderID, content, attachments)
+		msg, replayed, err := s.persistMessage(
+			ctx, app.ID, senderID, clientMessageID, content, attachments,
+		)
 
-		return msg, false, err
+		return msg, false, replayed, err
 
 	case ApplicationStatusRejected:
-		return nil, false, ErrApplicationRejected
+		return nil, false, false, ErrApplicationRejected
 
 	case ApplicationStatusArchived:
-		return nil, false, ErrApplicationArchived
+		return nil, false, false, ErrApplicationArchived
 
 	default:
-		return nil, false, ErrInvalidApplicationStatus
+		return nil, false, false, ErrInvalidApplicationStatus
 	}
 }
 
@@ -325,30 +354,36 @@ func (s *applicationService) persistMessage(
 	ctx context.Context,
 	threadID bson.ObjectID,
 	senderID string,
+	clientMessageID string,
 	content string,
 	attachments []attachment.Ref,
-) (*Message, error) {
+) (*Message, bool, error) {
 
 	now := time.Now().UTC()
 
 	msg := &Message{
-		ThreadID:    threadID,
-		SenderID:    senderID,
-		Content:     content,
-		Attachments: attachments,
-		IsRead:      false,
-		SentAt:      now,
+		ThreadID:        threadID,
+		SenderID:        senderID,
+		ClientMessageID: clientMessageID,
+		Content:         content,
+		Attachments:     attachments,
+		IsRead:          false,
+		SentAt:          now,
 	}
 
-	if err := s.repo.CreateMessage(ctx, msg); err != nil {
-		return nil, err
+	persisted, created, err := s.repo.CreateOrGetMessage(ctx, msg)
+	if err != nil {
+		return nil, false, err
+	}
+	if !created {
+		return persisted, true, nil
 	}
 
 	if err := s.repo.UpdateLastMessage(
 		ctx,
 		threadID,
 		content,
-		now,
+		persisted.SentAt,
 	); err != nil {
 		// The message is already durable. Report success to prevent clients from
 		// retrying and creating a duplicate; list ordering can be repaired later.
@@ -356,7 +391,7 @@ func (s *applicationService) persistMessage(
 			"thread_id", threadID.Hex(), "error", err)
 	}
 
-	return msg, nil
+	return persisted, false, nil
 }
 
 func conversationKey(gigID, userA, userB string) string {

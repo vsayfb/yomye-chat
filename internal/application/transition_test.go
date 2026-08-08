@@ -75,7 +75,20 @@ func (r *transitionRepository) UpdateLastMessage(
 	return nil
 }
 
-func (r *transitionRepository) CreateMessage(context.Context, *Message) error { return nil }
+func (r *transitionRepository) FindMessageByClientMessageID(
+	context.Context,
+	string,
+	string,
+) (*Message, error) {
+	return nil, nil
+}
+
+func (r *transitionRepository) CreateOrGetMessage(
+	context.Context,
+	*Message,
+) (*Message, bool, error) {
+	return nil, false, nil
+}
 
 func (r *transitionRepository) ListMessages(
 	context.Context,

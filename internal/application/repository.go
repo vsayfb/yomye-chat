@@ -58,10 +58,16 @@ type Repository interface {
 
 	// Messages
 
-	CreateMessage(
+	FindMessageByClientMessageID(
+		ctx context.Context,
+		senderID string,
+		clientMessageID string,
+	) (*Message, error)
+
+	CreateOrGetMessage(
 		ctx context.Context,
 		message *Message,
-	) error
+	) (*Message, bool, error)
 
 	ListMessages(
 		ctx context.Context,
@@ -117,13 +123,27 @@ func (r *applicationRepository) EnsureIndexes(ctx context.Context) error {
 		return err
 	}
 
-	_, err := r.messages.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "thread_id", Value: 1},
-			{Key: "sent_at", Value: -1},
-			{Key: "_id", Value: -1},
+	_, err := r.messages.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "thread_id", Value: 1},
+				{Key: "sent_at", Value: -1},
+				{Key: "_id", Value: -1},
+			},
+			Options: options.Index().SetName("application_messages_v2"),
 		},
-		Options: options.Index().SetName("application_messages_v2"),
+		{
+			Keys: bson.D{
+				{Key: "sender_id", Value: 1},
+				{Key: "client_message_id", Value: 1},
+			},
+			Options: options.Index().
+				SetName("application_message_idempotency").
+				SetUnique(true).
+				SetPartialFilterExpression(bson.M{
+					"client_message_id": bson.M{"$type": "string"},
+				}),
+		},
 	})
 	return err
 }
@@ -256,10 +276,29 @@ func (r *applicationRepository) UpdateLastMessage(
 	return err
 }
 
-func (r *applicationRepository) CreateMessage(
+func (r *applicationRepository) FindMessageByClientMessageID(
+	ctx context.Context,
+	senderID string,
+	clientMessageID string,
+) (*Message, error) {
+	var message Message
+	err := r.messages.FindOne(ctx, bson.M{
+		"sender_id":         senderID,
+		"client_message_id": clientMessageID,
+	}).Decode(&message)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &message, nil
+}
+
+func (r *applicationRepository) CreateOrGetMessage(
 	ctx context.Context,
 	message *Message,
-) error {
+) (*Message, bool, error) {
 	if message.ID.IsZero() {
 		message.ID = bson.NewObjectID()
 	}
@@ -268,9 +307,23 @@ func (r *applicationRepository) CreateMessage(
 		message.SentAt = time.Now().UTC()
 	}
 
-	_, err := r.messages.InsertOne(ctx, message)
+	var persisted Message
+	err := r.messages.FindOneAndUpdate(
+		ctx,
+		bson.M{
+			"sender_id":         message.SenderID,
+			"client_message_id": message.ClientMessageID,
+		},
+		bson.M{"$setOnInsert": message},
+		options.FindOneAndUpdate().
+			SetUpsert(true).
+			SetReturnDocument(options.After),
+	).Decode(&persisted)
+	if err != nil {
+		return nil, false, err
+	}
 
-	return err
+	return &persisted, persisted.ID == message.ID, nil
 }
 
 func (r *applicationRepository) ListMessages(

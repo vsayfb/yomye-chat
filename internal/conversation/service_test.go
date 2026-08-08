@@ -17,20 +17,30 @@ func TestSendDirectMessageCreatesAndReusesConversation(t *testing.T) {
 	service := NewService(repo, policy)
 	ctx := context.Background()
 
-	first, created, err := service.SendDirectMessage(ctx, "user-b", "user-a", "hello", nil)
+	first, created, replayed, err := service.SendDirectMessage(
+		ctx, "user-b", "user-a", "client-1", "hello", nil,
+	)
 	if err != nil {
 		t.Fatalf("first SendDirectMessage() error = %v", err)
 	}
 	if !created {
 		t.Fatal("first SendDirectMessage() did not create a conversation")
 	}
+	if replayed {
+		t.Fatal("first SendDirectMessage() reported a replay")
+	}
 
-	second, created, err := service.SendDirectMessage(ctx, "user-a", "user-b", "hi", nil)
+	second, created, replayed, err := service.SendDirectMessage(
+		ctx, "user-a", "user-b", "client-2", "hi", nil,
+	)
 	if err != nil {
 		t.Fatalf("second SendDirectMessage() error = %v", err)
 	}
 	if created {
 		t.Fatal("second SendDirectMessage() created a duplicate conversation")
+	}
+	if replayed {
+		t.Fatal("second SendDirectMessage() reported a replay")
 	}
 	if first.ConversationID != second.ConversationID {
 		t.Fatalf("conversation IDs differ: %s != %s", first.ConversationID, second.ConversationID)
@@ -53,10 +63,11 @@ func TestSendDirectMessageRejectsOptedOutTargetBeforeCreation(t *testing.T) {
 	policy := &fakeCreationPolicy{allowed: false}
 	service := NewService(repo, policy)
 
-	_, _, err := service.SendDirectMessage(
+	_, _, _, err := service.SendDirectMessage(
 		context.Background(),
 		"user-a",
 		"user-b",
+		"client-1",
 		"hello",
 		nil,
 	)
@@ -65,6 +76,37 @@ func TestSendDirectMessageRejectsOptedOutTargetBeforeCreation(t *testing.T) {
 	}
 	if len(repo.conversations) != 0 || len(repo.messages) != 0 {
 		t.Fatal("opted-out target caused content to be persisted")
+	}
+}
+
+func TestSendDirectMessageReplaysPersistedClientMessage(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	service := NewService(repo, &fakeCreationPolicy{allowed: true})
+	ctx := context.Background()
+
+	first, _, replayed, err := service.SendDirectMessage(
+		ctx, "user-a", "user-b", "client-retry", "hello", nil,
+	)
+	if err != nil || replayed {
+		t.Fatalf("first send: replayed=%v err=%v", replayed, err)
+	}
+
+	second, createdConversation, replayed, err := service.SendDirectMessage(
+		ctx, "user-a", "user-b", "client-retry", "hello", nil,
+	)
+	if err != nil {
+		t.Fatalf("retry error = %v", err)
+	}
+	if createdConversation || !replayed {
+		t.Fatalf("retry flags: created=%v replayed=%v", createdConversation, replayed)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("retry message ID = %s, want %s", second.ID, first.ID)
+	}
+	if len(repo.messages) != 1 {
+		t.Fatalf("message count = %d, want 1", len(repo.messages))
 	}
 }
 
@@ -143,12 +185,14 @@ type fakeRepository struct {
 	conversations map[bson.ObjectID]*Conversation
 	byDirectKey   map[string]*Conversation
 	messages      []*Message
+	byClientID    map[string]*Message
 }
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
 		conversations: make(map[bson.ObjectID]*Conversation),
 		byDirectKey:   make(map[string]*Conversation),
+		byClientID:    make(map[string]*Message),
 	}
 }
 
@@ -202,12 +246,28 @@ func (r *fakeRepository) UpdateLastMessage(
 	return nil
 }
 
-func (r *fakeRepository) CreateMessage(_ context.Context, message *Message) error {
+func (r *fakeRepository) FindMessageByClientMessageID(
+	_ context.Context,
+	senderID string,
+	clientMessageID string,
+) (*Message, error) {
+	return r.byClientID[senderID+"\x00"+clientMessageID], nil
+}
+
+func (r *fakeRepository) CreateOrGetMessage(
+	_ context.Context,
+	message *Message,
+) (*Message, bool, error) {
+	key := message.SenderID + "\x00" + message.ClientMessageID
+	if existing := r.byClientID[key]; existing != nil {
+		return existing, false, nil
+	}
 	if message.ID.IsZero() {
 		message.ID = bson.NewObjectID()
 	}
 	r.messages = append(r.messages, message)
-	return nil
+	r.byClientID[key] = message
+	return message, true, nil
 }
 
 func (r *fakeRepository) ListMessages(
