@@ -472,6 +472,19 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   and explicit values must be between 0 and 1. The unused
   `METRICS_SERVER_PORT` setting was removed; do not add a second metrics server
   unless the observability architecture intentionally changes.
+- **Privacy-safe domain tracing — implemented.** Domain spans cover WebSocket
+  ticket issue/authentication, durable application/direct message processing,
+  attachment authorization/confirmation/download/transaction/cleanup, Core
+  user/gig RPCs, R2 HEAD/delete calls, and SQS notification publishing. Message
+  work uses `context.WithoutCancel` before its bounded timeout so disconnects do
+  not cancel durable writes while the parent trace relationship is preserved.
+  Span attributes are bounded state such as domain, connection mode, attachment
+  count/media category, replay/persistence/delivery decisions, and transaction
+  attempt count. Never add user/conversation/message/attachment/gig IDs, client
+  message IDs, content, filenames, object keys, URLs, ETags, tokens, previews,
+  provider payloads, or raw error text. SQS failure marks its child publish span
+  failed but does not fail the successful durable message span because
+  notification delivery remains best effort.
 - **Critical Docker-backed integration suite — implemented.** Integration tests
   are required for Chat-owned persistence/protocol guarantees that mocks cannot
   prove. The suite uses a real MongoDB replica set and real HTTP/WebSocket Chat

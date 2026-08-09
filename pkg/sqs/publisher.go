@@ -9,6 +9,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	chatTracing "github.com/vsayfb/gig-platform-chat-service/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 type Publisher struct {
@@ -42,7 +44,12 @@ type NewMessageNotificationEvent struct {
 	OccurredAt     time.Time `json:"occurred_at"`
 }
 
-func (p *Publisher) PublishNewMessage(ctx context.Context, event Envelope) error {
+func (p *Publisher) PublishNewMessage(ctx context.Context, event Envelope) (err error) {
+	ctx, span := chatTracing.StartDomain(ctx, "chat.notification.publish",
+		attribute.String("messaging.system", "aws_sqs"),
+		attribute.String("notification.type", string(event.Type)),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
 
 	body, err := json.Marshal(event)
 	if err != nil {

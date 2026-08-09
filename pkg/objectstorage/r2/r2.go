@@ -20,6 +20,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/google/uuid"
+	chatTracing "github.com/vsayfb/gig-platform-chat-service/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -195,7 +197,12 @@ func (c *Client) PresignDownload(
 	}, nil
 }
 
-func (c *Client) Head(ctx context.Context, key string) (*Object, error) {
+func (c *Client) Head(ctx context.Context, key string) (object *Object, err error) {
+	ctx, span := chatTracing.StartDomain(ctx, "r2.object.head",
+		attribute.String("storage.system", "cloudflare_r2"),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
+
 	if err := c.validateKey(key); err != nil {
 		return nil, err
 	}
@@ -232,11 +239,16 @@ func (c *Client) Verify(ctx context.Context, request VerifyRequest) (*Object, er
 	return object, nil
 }
 
-func (c *Client) Delete(ctx context.Context, key string) error {
+func (c *Client) Delete(ctx context.Context, key string) (err error) {
+	ctx, span := chatTracing.StartDomain(ctx, "r2.object.delete",
+		attribute.String("storage.system", "cloudflare_r2"),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
+
 	if err := c.validateKey(key); err != nil {
 		return err
 	}
-	_, err := c.objects.DeleteObject(ctx, &s3.DeleteObjectInput{
+	_, err = c.objects.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(c.cfg.Bucket),
 		Key:    aws.String(key),
 	})

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	chatTracing "github.com/vsayfb/gig-platform-chat-service/pkg/tracing"
 	pb "github.com/vsayfb/gig-platform-protos/contracts"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -26,11 +28,17 @@ func NewUserClient(conn *grpc.ClientConn) *UserClient {
 	}
 }
 
-func (c *UserClient) GetUser(ctx context.Context, userID string) (*pb.GetUserResponse, error) {
+func (c *UserClient) GetUser(ctx context.Context, userID string) (resp *pb.GetUserResponse, err error) {
 	ctx, cancel := withCoreRPCTimeout(ctx)
 	defer cancel()
+	ctx, span := chatTracing.StartDomain(ctx, "core.user.get",
+		attribute.String("rpc.system", "grpc"),
+		attribute.String("rpc.service", "UserService"),
+		attribute.String("rpc.method", "GetUser"),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
 
-	resp, err := c.client.GetUser(
+	resp, err = c.client.GetUser(
 		ctx,
 		&pb.GetUserRequest{
 			UserId: userID,
@@ -98,11 +106,18 @@ func allowsSocialDirectMessages(user *pb.User) (bool, error) {
 	return false, nil
 }
 
-func (c *UserClient) GetUsers(ctx context.Context, userIDs []string) (*pb.GetUsersResponse, error) {
+func (c *UserClient) GetUsers(ctx context.Context, userIDs []string) (resp *pb.GetUsersResponse, err error) {
 	ctx, cancel := withCoreRPCTimeout(ctx)
 	defer cancel()
+	ctx, span := chatTracing.StartDomain(ctx, "core.user.list",
+		attribute.String("rpc.system", "grpc"),
+		attribute.String("rpc.service", "UserService"),
+		attribute.String("rpc.method", "GetUsers"),
+		attribute.Int("rpc.request_count", len(userIDs)),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
 
-	resp, err := c.client.GetUsers(
+	resp, err = c.client.GetUsers(
 		ctx,
 		&pb.GetUsersRequest{
 			UserIds: userIDs,
@@ -125,11 +140,17 @@ func NewGigClient(conn *grpc.ClientConn) *GigClient {
 	}
 }
 
-func (c *GigClient) GetGig(ctx context.Context, gigID string) (*pb.GetGigResponse, error) {
+func (c *GigClient) GetGig(ctx context.Context, gigID string) (resp *pb.GetGigResponse, err error) {
 	ctx, cancel := withCoreRPCTimeout(ctx)
 	defer cancel()
+	ctx, span := chatTracing.StartDomain(ctx, "core.gig.get",
+		attribute.String("rpc.system", "grpc"),
+		attribute.String("rpc.service", "GigService"),
+		attribute.String("rpc.method", "GetGig"),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
 
-	resp, err := c.client.GetGig(
+	resp, err = c.client.GetGig(
 		ctx,
 		&pb.GetGigRequest{
 			GigId: gigID,

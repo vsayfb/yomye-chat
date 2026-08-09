@@ -11,8 +11,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/vsayfb/gig-platform-chat-service/pkg/objectstorage/r2"
+	chatTracing "github.com/vsayfb/gig-platform-chat-service/pkg/tracing"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var (
@@ -73,7 +75,13 @@ func NewService(
 func (s *Service) AuthorizeUpload(
 	ctx context.Context,
 	input UploadInput,
-) (*UploadResult, error) {
+) (result *UploadResult, err error) {
+	ctx, span := chatTracing.StartDomain(ctx, "chat.attachment.authorize_upload",
+		attribute.String("chat.domain", string(input.Scope)),
+		attribute.String("attachment.media_category", mediaCategory(input.ContentType)),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
+
 	if err := s.authorize(ctx, input.Scope, input.ScopeID, input.UploaderID); err != nil {
 		return nil, err
 	}
@@ -129,7 +137,10 @@ func (s *Service) Confirm(
 	ctx context.Context,
 	id bson.ObjectID,
 	uploaderID string,
-) (*Attachment, error) {
+) (result *Attachment, err error) {
+	ctx, span := chatTracing.StartDomain(ctx, "chat.attachment.confirm")
+	defer func() { chatTracing.EndDomain(span, err) }()
+
 	item, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -137,6 +148,10 @@ func (s *Service) Confirm(
 	if item == nil || item.Status == StatusDeleted {
 		return nil, ErrNotFound
 	}
+	span.SetAttributes(
+		attribute.String("chat.domain", string(item.Scope)),
+		attribute.String("attachment.media_category", mediaCategory(item.ContentType)),
+	)
 	if item.UploaderID != uploaderID {
 		return nil, ErrForbidden
 	}
@@ -207,7 +222,10 @@ func (s *Service) Download(
 	ctx context.Context,
 	id bson.ObjectID,
 	userID string,
-) (*DownloadResult, error) {
+) (result *DownloadResult, err error) {
+	ctx, span := chatTracing.StartDomain(ctx, "chat.attachment.authorize_download")
+	defer func() { chatTracing.EndDomain(span, err) }()
+
 	item, err := s.repo.FindByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -215,6 +233,10 @@ func (s *Service) Download(
 	if item == nil || item.Status == StatusDeleted || item.Status == StatusDeleting {
 		return nil, ErrNotFound
 	}
+	span.SetAttributes(
+		attribute.String("chat.domain", string(item.Scope)),
+		attribute.String("attachment.media_category", mediaCategory(item.ContentType)),
+	)
 	if item.Status != StatusReady && item.Status != StatusAttached {
 		return nil, ErrInvalidState
 	}
@@ -222,13 +244,13 @@ func (s *Service) Download(
 		return nil, err
 	}
 
-	result, err := s.store.PresignDownload(
+	authorization, err := s.store.PresignDownload(
 		ctx, item.ObjectKey, item.OriginalName,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return &DownloadResult{URL: result.URL, ExpiresAt: result.ExpiresAt}, nil
+	return &DownloadResult{URL: authorization.URL, ExpiresAt: authorization.ExpiresAt}, nil
 }
 
 // CommitMessage runs message creation and READY -> ATTACHED transitions in one
@@ -243,9 +265,17 @@ func (s *Service) CommitMessage(
 	uploaderID string,
 	ids []bson.ObjectID,
 	create func(context.Context, []Ref) (bson.ObjectID, bool, error),
-) error {
+) (err error) {
+	ctx, span := chatTracing.StartDomain(ctx, "chat.attachment.commit",
+		attribute.String("chat.domain", string(scope)),
+		attribute.Int("message.attachment_count", len(ids)),
+		attribute.Bool("db.transaction", len(ids) > 0),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
+
 	if len(ids) == 0 {
-		_, _, err := create(ctx, nil)
+		_, created, err := create(ctx, nil)
+		span.SetAttributes(attribute.Bool("message.created", created))
 		return err
 	}
 	if len(ids) > MaxPerMessage {
@@ -261,7 +291,10 @@ func (s *Service) CommitMessage(
 	}
 	defer session.EndSession(ctx)
 
+	transactionAttempts := 0
+	messageCreated := false
 	_, err = session.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
+		transactionAttempts++
 		now := s.now()
 		items, err := s.repo.FindReady(
 			txCtx, ids, scope, scopeID, uploaderID, now,
@@ -290,6 +323,7 @@ func (s *Service) CommitMessage(
 		if err != nil {
 			return nil, err
 		}
+		messageCreated = created
 		if !created {
 			return messageID, nil
 		}
@@ -304,15 +338,26 @@ func (s *Service) CommitMessage(
 		}
 		return messageID, nil
 	})
+	span.SetAttributes(
+		attribute.Int("db.transaction_attempts", transactionAttempts),
+		attribute.Bool("message.created", messageCreated),
+	)
 	return err
 }
 
-func (s *Service) CleanupOne(ctx context.Context) (bool, error) {
+func (s *Service) CleanupOne(ctx context.Context) (processed bool, err error) {
 	now := s.now()
 	item, err := s.repo.ClaimExpired(ctx, now)
 	if err != nil || item == nil {
 		return false, err
 	}
+	ctx, span := chatTracing.StartDomain(ctx, "chat.attachment.cleanup",
+		attribute.String("chat.domain", string(item.Scope)),
+		attribute.String("attachment.status", string(item.Status)),
+		attribute.Int("attachment.deletion_attempt", item.DeletionAttempts),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
+
 	if err := s.store.Delete(ctx, item.ObjectKey); err != nil {
 		delay := time.Duration(item.DeletionAttempts) * time.Minute
 		if delay > time.Hour {
@@ -322,6 +367,21 @@ func (s *Service) CleanupOne(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	return true, s.repo.MarkDeleted(ctx, item.ID, now)
+}
+
+func mediaCategory(contentType string) string {
+	parsed, _, err := mime.ParseMediaType(strings.TrimSpace(contentType))
+	if err != nil {
+		return "unknown"
+	}
+	parsed = strings.ToLower(parsed)
+	if strings.HasPrefix(parsed, "image/") {
+		return "image"
+	}
+	if strings.HasPrefix(parsed, "video/") {
+		return "video"
+	}
+	return "other"
 }
 
 func validateMedia(

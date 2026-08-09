@@ -26,6 +26,8 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/pkg/jwt"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/middleware"
 	mysqs "github.com/vsayfb/gig-platform-chat-service/pkg/sqs"
+	chatTracing "github.com/vsayfb/gig-platform-chat-service/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const (
@@ -159,19 +161,29 @@ type ticketResponse struct {
 // one-time WebSocket ticket. The raw access JWT never needs to appear in a
 // WebSocket URL.
 func (h *WSHandler) IssueTicket(w http.ResponseWriter, r *http.Request) {
+	ctx, span := chatTracing.StartDomain(r.Context(), "chat.ws.ticket.issue",
+		attribute.Bool("ws.origin_present", r.Header.Get("Origin") != ""),
+	)
+	var spanErr error
+	defer func() { chatTracing.EndDomain(span, spanErr) }()
+	r = r.WithContext(ctx)
+
 	if !h.originAllowed(r) {
+		spanErr = errors.New("origin rejected")
 		httputil.WriteError(w, http.StatusForbidden, "origin not allowed")
 		return
 	}
 
 	claims := middleware.GetClaims(r.Context())
 	if claims == nil {
+		spanErr = errors.New("missing authenticated claims")
 		httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
 
 	ticket, expiresAt, err := h.tickets.Issue(claims)
 	if err != nil {
+		spanErr = err
 		slog.ErrorContext(r.Context(), "ws: issue ticket failed", "error", err)
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to issue websocket ticket")
 		return
@@ -185,20 +197,42 @@ func (h *WSHandler) IssueTicket(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *WSHandler) authenticateTicket(w http.ResponseWriter, r *http.Request) (*jwt.Claims, bool) {
+func (h *WSHandler) authenticateTicket(w http.ResponseWriter, r *http.Request) (claims *jwt.Claims, ok bool) {
+	domain := channelApplication
+	resumeParameter := "threadID"
+	if r.URL.Path == "/ws/direct" {
+		domain = channelDirect
+		resumeParameter = "conversationID"
+	}
+	connectionMode := "first_contact"
+	if r.URL.Query().Get(resumeParameter) != "" {
+		connectionMode = "resume"
+	}
+	_, span := chatTracing.StartDomain(r.Context(), "chat.ws.authenticate",
+		attribute.String("ws.auth.method", "one_time_ticket"),
+		attribute.Bool("ws.origin_present", r.Header.Get("Origin") != ""),
+		attribute.String("chat.domain", domain),
+		attribute.String("chat.connection_mode", connectionMode),
+	)
+	var spanErr error
+	defer func() { chatTracing.EndDomain(span, spanErr) }()
+
 	if !h.originAllowed(r) {
+		spanErr = errors.New("origin rejected")
 		httputil.WriteError(w, http.StatusForbidden, "origin not allowed")
 		return nil, false
 	}
 
 	ticket := r.URL.Query().Get("ticket")
 	if ticket == "" {
+		spanErr = errors.New("missing ticket")
 		httputil.WriteError(w, http.StatusUnauthorized, "missing websocket ticket")
 		return nil, false
 	}
 
 	claims, err := h.tickets.Consume(ticket)
 	if err != nil {
+		spanErr = err
 		httputil.WriteError(w, http.StatusUnauthorized, "invalid or expired websocket ticket")
 		return nil, false
 	}
@@ -385,6 +419,7 @@ func (h *WSHandler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.handleMessage(
+			ctx,
 			client,
 			*sender,
 			*receiver,
@@ -539,6 +574,7 @@ func (h *WSHandler) writeResolveError(w http.ResponseWriter, ctx context.Context
 }
 
 func (h *WSHandler) handleMessage(
+	parentCtx context.Context,
 	client *hub.Client,
 	sender dto.Sender,
 	receiver dto.Receiver,
@@ -548,21 +584,34 @@ func (h *WSHandler) handleMessage(
 	content string,
 	attachmentIDs []bson.ObjectID,
 ) {
-	// Use a background context since the request context is cancelled when the
-	// WebSocket disconnects, but persistence and notification should still complete.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Preserve the socket trace relationship without letting a disconnect cancel
+	// an in-flight durable write.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 10*time.Second)
 	defer cancel()
+	ctx, span := chatTracing.StartDomain(ctx, "chat.message.process",
+		attribute.String("chat.domain", channelApplication),
+		attribute.Bool("message.has_text", content != ""),
+		attribute.Int("message.attachment_count", len(attachmentIDs)),
+	)
+	var spanErr error
+	defer func() { chatTracing.EndDomain(span, spanErr) }()
 
 	existing, err := h.applicationSvc.FindMessageByClientMessageID(
 		ctx, sender.ID, clientMessageID,
 	)
 	if err != nil {
+		spanErr = err
 		slog.ErrorContext(ctx, "ws: idempotency lookup failed",
 			"sender_id", sender.ID, "client_message_id", clientMessageID, "error", err)
 		h.writeClientError(client, clientMessageID, "internal_error", "Could not persist message.")
 		return
 	}
 	if existing != nil {
+		span.SetAttributes(
+			attribute.Bool("message.replayed", true),
+			attribute.Bool("message.persisted", true),
+			attribute.Bool("notification.required", false),
+		)
 		h.writeAccepted(client, outgoingAccepted{
 			Type:            "message.accepted",
 			ClientMessageID: clientMessageID,
@@ -574,6 +623,7 @@ func (h *WSHandler) handleMessage(
 	}
 
 	if len(attachmentIDs) > 0 && threadID.IsZero() {
+		spanErr = attachment.ErrInvalidState
 		h.writeClientError(
 			client, clientMessageID, "attachments_require_thread",
 			"Reconnect using threadID before sending attachments.",
@@ -601,6 +651,7 @@ func (h *WSHandler) handleMessage(
 	)
 
 	if err != nil {
+		spanErr = err
 		slog.ErrorContext(
 			ctx,
 			"ws: send message failed",
@@ -625,7 +676,12 @@ func (h *WSHandler) handleMessage(
 		ThreadID:        msg.ThreadID.Hex(),
 		SentAt:          msg.SentAt.Format(time.RFC3339),
 	})
+	span.SetAttributes(
+		attribute.Bool("message.replayed", replayed),
+		attribute.Bool("message.persisted", true),
+	)
 	if replayed {
+		span.SetAttributes(attribute.Bool("notification.required", false))
 		return
 	}
 
@@ -641,6 +697,7 @@ func (h *WSHandler) handleMessage(
 	payload, err := json.Marshal(outgoing)
 
 	if err != nil {
+		spanErr = err
 		slog.ErrorContext(
 			ctx,
 			"ws: marshal outgoing message failed",
@@ -652,16 +709,23 @@ func (h *WSHandler) handleMessage(
 
 	// Deliver immediately if the recipient is online.
 	if h.hub.SendChannel(receiver.ID, channelApplication, payload) {
+		span.SetAttributes(
+			attribute.String("message.delivery", "online"),
+			attribute.Bool("notification.required", false),
+		)
 		return
 	}
+	span.SetAttributes(attribute.String("message.delivery", "offline"))
 
 	// Recipient is offline. Only publish a notification event when this
 	// message just created the thread — i.e. a brand-new application the
 	// target hasn't seen yet. Subsequent messages in an existing thread no
 	// longer trigger an SQS publish.
 	if !isNewThread {
+		span.SetAttributes(attribute.Bool("notification.required", false))
 		return
 	}
+	span.SetAttributes(attribute.Bool("notification.required", true))
 
 	event := mysqs.Envelope{
 		Type: mysqs.EventNewMessage,
@@ -679,6 +743,9 @@ func (h *WSHandler) handleMessage(
 	err = h.publisher.PublishNewMessage(ctx, event)
 
 	if err != nil {
+		// The durable message remains successful. Notification delivery is an
+		// accepted best-effort side effect and does not fail message processing.
+		span.SetAttributes(attribute.Bool("notification.published", false))
 		slog.ErrorContext(
 			ctx,
 			"ws: publish offline notification failed",
@@ -686,7 +753,9 @@ func (h *WSHandler) handleMessage(
 			"receiver_id", receiver.ID,
 			"error", err,
 		)
+		return
 	}
+	span.SetAttributes(attribute.Bool("notification.published", true))
 }
 
 // ServeDirectWS handles casual, non-application direct conversations.
@@ -803,6 +872,7 @@ func (h *WSHandler) ServeDirectWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		h.handleDirectMessage(
+			ctx,
 			client,
 			sender,
 			targetID,
@@ -887,6 +957,7 @@ func (h *WSHandler) writeDirectResolveError(
 }
 
 func (h *WSHandler) handleDirectMessage(
+	parentCtx context.Context,
 	client *hub.Client,
 	sender dto.Sender,
 	targetID string,
@@ -895,19 +966,32 @@ func (h *WSHandler) handleDirectMessage(
 	content string,
 	attachmentIDs []bson.ObjectID,
 ) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 10*time.Second)
 	defer cancel()
+	ctx, span := chatTracing.StartDomain(ctx, "chat.message.process",
+		attribute.String("chat.domain", channelDirect),
+		attribute.Bool("message.has_text", content != ""),
+		attribute.Int("message.attachment_count", len(attachmentIDs)),
+	)
+	var spanErr error
+	defer func() { chatTracing.EndDomain(span, spanErr) }()
 
 	existing, err := h.conversationSvc.FindMessageByClientMessageID(
 		ctx, sender.ID, clientMessageID,
 	)
 	if err != nil {
+		spanErr = err
 		slog.ErrorContext(ctx, "ws: direct idempotency lookup failed",
 			"sender_id", sender.ID, "client_message_id", clientMessageID, "error", err)
 		h.writeClientError(client, clientMessageID, "internal_error", "Could not persist message.")
 		return
 	}
 	if existing != nil {
+		span.SetAttributes(
+			attribute.Bool("message.replayed", true),
+			attribute.Bool("message.persisted", true),
+			attribute.Bool("notification.required", false),
+		)
 		h.writeAccepted(client, outgoingAccepted{
 			Type:            "message.accepted",
 			ClientMessageID: clientMessageID,
@@ -919,6 +1003,7 @@ func (h *WSHandler) handleDirectMessage(
 	}
 
 	if len(attachmentIDs) > 0 && conversationID.IsZero() {
+		spanErr = attachment.ErrInvalidState
 		h.writeClientError(
 			client, clientMessageID, "attachments_require_conversation",
 			"Reconnect using conversationID before sending attachments.",
@@ -944,6 +1029,7 @@ func (h *WSHandler) handleDirectMessage(
 		},
 	)
 	if err != nil {
+		spanErr = err
 		slog.ErrorContext(ctx, "ws: send direct message failed",
 			"sender_id", sender.ID, "target_id", targetID, "error", err)
 		if code, message, ok := attachmentMessageError(err); ok {
@@ -962,7 +1048,12 @@ func (h *WSHandler) handleDirectMessage(
 		ConversationID:  msg.ConversationID.Hex(),
 		SentAt:          msg.SentAt.Format(time.RFC3339),
 	})
+	span.SetAttributes(
+		attribute.Bool("message.replayed", replayed),
+		attribute.Bool("message.persisted", true),
+	)
 	if replayed {
+		span.SetAttributes(attribute.Bool("notification.required", false))
 		return
 	}
 
@@ -976,13 +1067,22 @@ func (h *WSHandler) handleDirectMessage(
 	}
 	payload, err := json.Marshal(outgoing)
 	if err != nil {
+		spanErr = err
 		slog.ErrorContext(ctx, "ws: marshal direct message failed", "error", err)
 		return
 	}
 
 	if h.hub.SendRoute(targetID, channelDirect, sender.ID, payload) {
+		span.SetAttributes(
+			attribute.String("message.delivery", "online"),
+			attribute.Bool("notification.required", false),
+		)
 		return
 	}
+	span.SetAttributes(
+		attribute.String("message.delivery", "offline"),
+		attribute.Bool("notification.required", true),
+	)
 
 	event := mysqs.Envelope{
 		Type: mysqs.EventNewMessage,
@@ -997,9 +1097,12 @@ func (h *WSHandler) handleDirectMessage(
 		},
 	}
 	if err := h.publisher.PublishNewMessage(ctx, event); err != nil {
+		span.SetAttributes(attribute.Bool("notification.published", false))
 		slog.ErrorContext(ctx, "ws: publish direct notification failed",
 			"conversation_id", outgoing.ConversationID, "error", err)
+		return
 	}
+	span.SetAttributes(attribute.Bool("notification.published", true))
 }
 
 func (h *WSHandler) writeClientError(
