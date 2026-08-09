@@ -159,8 +159,10 @@ single-user `GetUser` path previously omitted field 4. Do not switch back until
 that contract is demonstrably fixed and generated protobuf packages are
 consistent.
 
-The first message in any new direct conversation is plain text. Attachments
-require an already-existing `conversationID`.
+The first message in a new direct conversation may contain text, attachments,
+or both. First-contact attachment authorization is provisionally bound to the
+exact uploader/target pair until the first message atomically creates the
+conversation.
 
 ## WebSocket message contract
 
@@ -277,7 +279,7 @@ Limits:
 The declared duration is only best effort. R2 `HEAD` cannot inspect real video
 duration.
 
-Upload flow:
+Existing-scope upload flow:
 
 1. Authenticate and verify current participation in an existing scope.
 2. Validate declared filename, MIME, size, and duration.
@@ -289,6 +291,22 @@ Upload flow:
 7. Recheck uploader and current participation, then use authoritative R2 HEAD
    metadata to verify exact size and normalized MIME.
 8. Idempotently move the record to `READY`.
+
+First-contact uploads use separate endpoints and a provisional binding because
+no thread/conversation ID exists yet. Before creating a pending record or
+presigning R2, Chat verifies that Core returns the exact target user. Direct
+uploads also enforce the target's social-message preference when no existing
+conversation exists; application uploads verify the gig. The pending record is
+bound to the exact uploader, target, domain, and application gig where relevant.
+Confirmation repeats those checks. Provisional READY attachments cannot be
+downloaded. The first WebSocket message atomically creates the durable scope and
+message, changes the exact provisional attachments to `ATTACHED`, records the
+new scope ID, and removes the provisional binding. A failure rolls all database
+changes back. Never presign when target validation or policy checks fail.
+The first-contact endpoints also reject when the corresponding direct
+conversation or application already exists; clients must then use the existing
+scope's ID-based upload endpoint. This existence check happens before pending
+state or a presigned URL is created.
 
 Presigned PUT details are security-critical:
 
@@ -303,8 +321,8 @@ Presigned PUT details are security-critical:
 Only `READY` attachments owned by the sender and belonging to the exact message
 scope can be attached. Message creation and all `READY -> ATTACHED` transitions
 run in one Mongo transaction. Never replace that with best-effort sequential
-writes. Attachments require an existing thread/conversation, which preserves
-the product rule that the first message is text-only.
+writes. First-contact attachments use generated `chat/pending/...` keys; R2
+object placement is not authorization, so access remains attachment-ID based.
 
 Downloads resolve by attachment ID, load the record, recheck current
 participation, and only then issue a short-lived presigned GET. URLs are never
@@ -342,10 +360,12 @@ Authenticated REST routes use bearer JWT middleware:
 - `GET /applications/{threadID}/messages?before=<RFC3339Nano>&before_id=<ObjectID>&limit=<1..100>`
 - `POST /applications/{threadID}/approve`
 - `POST /applications/{threadID}/reject`
+- `POST /applications/attachments/uploads` (first contact; includes `target_id` and `gig_id`)
 - `POST /applications/{threadID}/attachments/uploads`
 - `GET /conversations/me`
 - `GET /conversations/{conversationID}`
 - `GET /conversations/{conversationID}/messages?before=<RFC3339Nano>&before_id=<ObjectID>&limit=<1..100>`
+- `POST /conversations/attachments/uploads` (first contact; includes `target_id`)
 - `POST /conversations/{conversationID}/attachments/uploads`
 - `POST /attachments/{attachmentID}/confirm`
 - `GET /attachments/{attachmentID}/download`

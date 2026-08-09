@@ -622,31 +622,25 @@ func (h *WSHandler) handleMessage(
 		return
 	}
 
-	if len(attachmentIDs) > 0 && threadID.IsZero() {
-		spanErr = attachment.ErrInvalidState
-		h.writeClientError(
-			client, clientMessageID, "attachments_require_thread",
-			"Reconnect using threadID before sending attachments.",
-		)
-		return
-	}
-
 	var (
 		msg         *application.Message
 		isNewThread bool
 		replayed    bool
 	)
 	err = h.attachmentSvc.CommitMessage(
-		ctx, attachment.ScopeApplication, threadID, sender.ID, attachmentIDs,
-		func(txCtx context.Context, refs []attachment.Ref) (bson.ObjectID, bool, error) {
+		ctx, attachment.ScopeApplication, threadID,
+		sender.ID, receiver.ID, gig.ID, attachmentIDs,
+		func(txCtx context.Context, refs []attachment.Ref) (
+			bson.ObjectID, bson.ObjectID, bool, error,
+		) {
 			var sendErr error
 			msg, isNewThread, replayed, sendErr = h.applicationSvc.SendMessage(
 				txCtx, sender.ID, receiver.ID, gig.ID, clientMessageID, content, refs,
 			)
 			if sendErr != nil {
-				return bson.NilObjectID, false, sendErr
+				return bson.NilObjectID, bson.NilObjectID, false, sendErr
 			}
-			return msg.ID, !replayed, nil
+			return msg.ID, msg.ThreadID, !replayed, nil
 		},
 	)
 
@@ -1002,30 +996,24 @@ func (h *WSHandler) handleDirectMessage(
 		return
 	}
 
-	if len(attachmentIDs) > 0 && conversationID.IsZero() {
-		spanErr = attachment.ErrInvalidState
-		h.writeClientError(
-			client, clientMessageID, "attachments_require_conversation",
-			"Reconnect using conversationID before sending attachments.",
-		)
-		return
-	}
-
 	var (
 		msg      *conversation.Message
 		replayed bool
 	)
 	err = h.attachmentSvc.CommitMessage(
-		ctx, attachment.ScopeDirect, conversationID, sender.ID, attachmentIDs,
-		func(txCtx context.Context, refs []attachment.Ref) (bson.ObjectID, bool, error) {
+		ctx, attachment.ScopeDirect, conversationID,
+		sender.ID, targetID, "", attachmentIDs,
+		func(txCtx context.Context, refs []attachment.Ref) (
+			bson.ObjectID, bson.ObjectID, bool, error,
+		) {
 			var sendErr error
 			msg, _, replayed, sendErr = h.conversationSvc.SendDirectMessage(
 				txCtx, sender.ID, targetID, clientMessageID, content, refs,
 			)
 			if sendErr != nil {
-				return bson.NilObjectID, false, sendErr
+				return bson.NilObjectID, bson.NilObjectID, false, sendErr
 			}
-			return msg.ID, !replayed, nil
+			return msg.ID, msg.ConversationID, !replayed, nil
 		},
 	)
 	if err != nil {

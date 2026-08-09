@@ -28,6 +28,29 @@ func TestGetApplicationRequiresParticipant(t *testing.T) {
 	}
 }
 
+func TestApplicationExistsUsesGigAndUnorderedParticipants(t *testing.T) {
+	t.Parallel()
+
+	repo := newIdempotencyRepository()
+	repo.app = &Application{
+		GigID: "gig-1", InitiatorID: "worker", TargetID: "employer",
+	}
+	service := NewApplicationService(repo)
+
+	exists, err := service.ApplicationExists(
+		context.Background(), "gig-1", "employer", "worker",
+	)
+	if err != nil || !exists {
+		t.Fatalf("ApplicationExists() exists=%t err=%v, want true", exists, err)
+	}
+	exists, err = service.ApplicationExists(
+		context.Background(), "gig-2", "worker", "employer",
+	)
+	if err != nil || exists {
+		t.Fatalf("ApplicationExists() exists=%t err=%v, want false", exists, err)
+	}
+}
+
 func TestListMessagesAuthorizesBeforeRepositoryRead(t *testing.T) {
 	t.Parallel()
 

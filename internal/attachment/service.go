@@ -18,14 +18,18 @@ import (
 )
 
 var (
-	ErrNotFound         = errors.New("attachment not found")
-	ErrForbidden        = errors.New("attachment access forbidden")
-	ErrInvalidInput     = errors.New("invalid attachment input")
-	ErrInvalidState     = errors.New("invalid attachment state")
-	ErrExpired          = errors.New("attachment expired")
-	ErrTooMany          = errors.New("too many attachments")
-	ErrDuplicate        = errors.New("duplicate attachment")
-	ErrMetadataMismatch = errors.New("attachment metadata mismatch")
+	ErrNotFound               = errors.New("attachment not found")
+	ErrForbidden              = errors.New("attachment access forbidden")
+	ErrInvalidInput           = errors.New("invalid attachment input")
+	ErrInvalidState           = errors.New("invalid attachment state")
+	ErrExpired                = errors.New("attachment expired")
+	ErrTooMany                = errors.New("too many attachments")
+	ErrDuplicate              = errors.New("duplicate attachment")
+	ErrMetadataMismatch       = errors.New("attachment metadata mismatch")
+	ErrTargetNotFound         = errors.New("target user not found")
+	ErrGigNotFound            = errors.New("gig not found")
+	ErrDirectMessagesDisabled = errors.New("target user does not allow direct messages")
+	ErrScopeAlreadyExists     = errors.New("conversation already exists")
 )
 
 const (
@@ -44,6 +48,14 @@ type ScopeAuthorizer func(
 	userID string,
 ) error
 
+type FirstContactAuthorizer func(
+	ctx context.Context,
+	scope Scope,
+	uploaderID string,
+	targetID string,
+	gigID string,
+) error
+
 type ObjectStore interface {
 	NewObjectKey(scope, contentType string) (string, error)
 	PresignUpload(context.Context, r2.UploadRequest) (*r2.UploadAuthorization, error)
@@ -53,11 +65,12 @@ type ObjectStore interface {
 }
 
 type Service struct {
-	repo      Repository
-	store     ObjectStore
-	client    *mongo.Client
-	authorize ScopeAuthorizer
-	now       func() time.Time
+	repo           Repository
+	store          ObjectStore
+	client         *mongo.Client
+	authorize      ScopeAuthorizer
+	authorizeFirst FirstContactAuthorizer
+	now            func() time.Time
 }
 
 func NewService(
@@ -65,11 +78,82 @@ func NewService(
 	store ObjectStore,
 	client *mongo.Client,
 	authorize ScopeAuthorizer,
+	authorizeFirst FirstContactAuthorizer,
 ) *Service {
 	return &Service{
-		repo: repo, store: store, client: client, authorize: authorize,
+		repo: repo, store: store, client: client,
+		authorize: authorize, authorizeFirst: authorizeFirst,
 		now: func() time.Time { return time.Now().UTC() },
 	}
+}
+
+func (s *Service) AuthorizeFirstContactUpload(
+	ctx context.Context,
+	input FirstContactUploadInput,
+) (result *UploadResult, err error) {
+	ctx, span := chatTracing.StartDomain(ctx, "chat.attachment.authorize_first_contact_upload",
+		attribute.String("chat.domain", string(input.Scope)),
+		attribute.String("attachment.media_category", mediaCategory(input.ContentType)),
+	)
+	defer func() { chatTracing.EndDomain(span, err) }()
+
+	if s.authorizeFirst == nil || input.UploaderID == "" || input.TargetID == "" ||
+		input.UploaderID == input.TargetID {
+		return nil, ErrInvalidInput
+	}
+	if err := s.authorizeFirst(
+		ctx, input.Scope, input.UploaderID, input.TargetID, input.GigID,
+	); err != nil {
+		return nil, err
+	}
+
+	name, err := safeOriginalName(input.OriginalName)
+	if err != nil {
+		return nil, err
+	}
+	contentType, maxSize, err := validateMedia(
+		input.ContentType, input.SizeBytes, input.DurationMillis,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	now := s.now()
+	expiresAt := now.Add(PendingTTL)
+	item := &Attachment{
+		ID: bson.NewObjectID(), Scope: input.Scope,
+		UploaderID: input.UploaderID, Provisional: true,
+		TargetID: input.TargetID, GigID: input.GigID,
+		OriginalName: name, ContentType: contentType,
+		SizeBytes: input.SizeBytes, DurationMillis: input.DurationMillis,
+		Status: StatusPendingUpload, ExpiresAt: &expiresAt,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	key, err := s.store.NewObjectKey(
+		fmt.Sprintf("pending/%s/%s", input.Scope, item.ID.Hex()),
+		contentType,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("generate provisional attachment key: %w", err)
+	}
+	item.ObjectKey = key
+
+	if err := s.repo.Create(ctx, item); err != nil {
+		return nil, err
+	}
+	authorization, err := s.store.PresignUpload(ctx, r2.UploadRequest{
+		Key: key, ContentType: contentType, SizeBytes: input.SizeBytes,
+		MaxSizeBytes: maxSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &UploadResult{
+		AttachmentID: item.ID,
+		URL:          authorization.URL, Method: authorization.Method,
+		Headers: authorization.Headers, ExpiresAt: authorization.ExpiresAt,
+	}, nil
 }
 
 func (s *Service) AuthorizeUpload(
@@ -155,8 +239,19 @@ func (s *Service) Confirm(
 	if item.UploaderID != uploaderID {
 		return nil, ErrForbidden
 	}
-	if err := s.authorize(ctx, item.Scope, item.ScopeID, uploaderID); err != nil {
-		return nil, err
+	if item.Provisional {
+		if s.authorizeFirst == nil {
+			return nil, ErrInvalidState
+		}
+		if err := s.authorizeFirst(
+			ctx, item.Scope, uploaderID, item.TargetID, item.GigID,
+		); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.authorize(ctx, item.Scope, item.ScopeID, uploaderID); err != nil {
+			return nil, err
+		}
 	}
 	if item.Status == StatusReady || item.Status == StatusAttached {
 		return item, nil
@@ -240,6 +335,9 @@ func (s *Service) Download(
 	if item.Status != StatusReady && item.Status != StatusAttached {
 		return nil, ErrInvalidState
 	}
+	if item.Provisional {
+		return nil, ErrInvalidState
+	}
 	if err := s.authorize(ctx, item.Scope, item.ScopeID, userID); err != nil {
 		return nil, err
 	}
@@ -263,8 +361,10 @@ func (s *Service) CommitMessage(
 	scope Scope,
 	scopeID bson.ObjectID,
 	uploaderID string,
+	targetID string,
+	gigID string,
 	ids []bson.ObjectID,
-	create func(context.Context, []Ref) (bson.ObjectID, bool, error),
+	create func(context.Context, []Ref) (bson.ObjectID, bson.ObjectID, bool, error),
 ) (err error) {
 	ctx, span := chatTracing.StartDomain(ctx, "chat.attachment.commit",
 		attribute.String("chat.domain", string(scope)),
@@ -274,7 +374,7 @@ func (s *Service) CommitMessage(
 	defer func() { chatTracing.EndDomain(span, err) }()
 
 	if len(ids) == 0 {
-		_, created, err := create(ctx, nil)
+		_, _, created, err := create(ctx, nil)
 		span.SetAttributes(attribute.Bool("message.created", created))
 		return err
 	}
@@ -296,11 +396,19 @@ func (s *Service) CommitMessage(
 	_, err = session.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
 		transactionAttempts++
 		now := s.now()
-		items, err := s.repo.FindReady(
-			txCtx, ids, scope, scopeID, uploaderID, now,
-		)
-		if err != nil {
-			return nil, err
+		var items []Attachment
+		var findErr error
+		if scopeID.IsZero() {
+			items, findErr = s.repo.FindReadyProvisional(
+				txCtx, ids, scope, uploaderID, targetID, gigID, now,
+			)
+		} else {
+			items, findErr = s.repo.FindReady(
+				txCtx, ids, scope, scopeID, uploaderID, now,
+			)
+		}
+		if findErr != nil {
+			return nil, findErr
 		}
 		if len(items) != len(ids) {
 			return nil, ErrInvalidState
@@ -319,7 +427,7 @@ func (s *Service) CommitMessage(
 			refs = append(refs, ref)
 		}
 
-		messageID, created, err := create(txCtx, refs)
+		messageID, actualScopeID, created, err := create(txCtx, refs)
 		if err != nil {
 			return nil, err
 		}
@@ -327,9 +435,23 @@ func (s *Service) CommitMessage(
 		if !created {
 			return messageID, nil
 		}
-		count, err := s.repo.MarkAttached(
-			txCtx, ids, scope, scopeID, uploaderID, messageID, now,
-		)
+		if actualScopeID.IsZero() {
+			return nil, ErrInvalidState
+		}
+		if !scopeID.IsZero() && actualScopeID != scopeID {
+			return nil, ErrInvalidState
+		}
+		var count int64
+		if scopeID.IsZero() {
+			count, err = s.repo.MarkProvisionalAttached(
+				txCtx, ids, scope, uploaderID, targetID, gigID,
+				actualScopeID, messageID, now,
+			)
+		} else {
+			count, err = s.repo.MarkAttached(
+				txCtx, ids, scope, scopeID, uploaderID, messageID, now,
+			)
+		}
 		if err != nil {
 			return nil, err
 		}

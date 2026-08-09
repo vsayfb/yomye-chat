@@ -28,6 +28,7 @@ type Service interface {
 	// Applications
 	ListApplications(ctx context.Context, userID string) ([]ApplicationSummary, error)
 	GetApplication(ctx context.Context, threadID bson.ObjectID, userID string) (*Application, error)
+	ApplicationExists(ctx context.Context, gigID, userA, userB string) (bool, error)
 
 	ApproveApplication(ctx context.Context, threadID bson.ObjectID, approverID string) error
 	RejectApplication(ctx context.Context, threadID bson.ObjectID, approverID string) error
@@ -60,6 +61,19 @@ type Service interface {
 		content string,
 		attachments []attachment.Ref,
 	) (msg *Message, isNewThread bool, replayed bool, err error)
+}
+
+func (s *applicationService) ApplicationExists(
+	ctx context.Context,
+	gigID string,
+	userA string,
+	userB string,
+) (bool, error) {
+	app, err := s.repo.FindApplicationByParticipants(ctx, gigID, userA, userB)
+	if err != nil {
+		return false, err
+	}
+	return app != nil, nil
 }
 
 type applicationService struct {

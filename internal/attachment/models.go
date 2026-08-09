@@ -27,8 +27,14 @@ type Attachment struct {
 	ID bson.ObjectID `bson:"_id,omitempty" json:"id"`
 
 	Scope      Scope         `bson:"scope" json:"scope"`
-	ScopeID    bson.ObjectID `bson:"scope_id" json:"scope_id"`
+	ScopeID    bson.ObjectID `bson:"scope_id,omitempty" json:"scope_id,omitempty"`
 	UploaderID string        `bson:"uploader_id" json:"uploader_id"`
+	// Provisional attachments belong to a first-contact message before its
+	// conversation/application exists. These fields are removed atomically when
+	// the first message creates the durable scope.
+	Provisional bool   `bson:"provisional,omitempty" json:"-"`
+	TargetID    string `bson:"target_id,omitempty" json:"-"`
+	GigID       string `bson:"gig_id,omitempty" json:"-"`
 
 	ObjectKey      string `bson:"object_key" json:"-"`
 	OriginalName   string `bson:"original_filename" json:"original_filename"`
@@ -72,6 +78,17 @@ type UploadInput struct {
 	Scope          Scope
 	ScopeID        bson.ObjectID
 	UploaderID     string
+	OriginalName   string
+	ContentType    string
+	SizeBytes      int64
+	DurationMillis int64
+}
+
+type FirstContactUploadInput struct {
+	Scope          Scope
+	UploaderID     string
+	TargetID       string
+	GigID          string
 	OriginalName   string
 	ContentType    string
 	SizeBytes      int64

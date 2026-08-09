@@ -166,7 +166,7 @@ func newTestEnv(t *testing.T, options testEnvOptions) *testEnv {
 	}
 
 	env.convSvc = conversation.NewService(env.convRepo, userClient)
-	env.attachSvc = attachment.NewService(env.attachRepo, nil, mongoClient, nil)
+	env.attachSvc = attachment.NewService(env.attachRepo, nil, mongoClient, nil, nil)
 
 	publisher, sqsServer, sqsRequests := newSQSPublisher(t, options.sqsStatus)
 	env.sqsServer = sqsServer

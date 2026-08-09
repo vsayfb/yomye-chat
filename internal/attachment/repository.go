@@ -33,12 +33,32 @@ type Repository interface {
 		uploaderID string,
 		now time.Time,
 	) ([]Attachment, error)
+	FindReadyProvisional(
+		ctx context.Context,
+		ids []bson.ObjectID,
+		scope Scope,
+		uploaderID string,
+		targetID string,
+		gigID string,
+		now time.Time,
+	) ([]Attachment, error)
 	MarkAttached(
 		ctx context.Context,
 		ids []bson.ObjectID,
 		scope Scope,
 		scopeID bson.ObjectID,
 		uploaderID string,
+		messageID bson.ObjectID,
+		now time.Time,
+	) (int64, error)
+	MarkProvisionalAttached(
+		ctx context.Context,
+		ids []bson.ObjectID,
+		scope Scope,
+		uploaderID string,
+		targetID string,
+		gigID string,
+		scopeID bson.ObjectID,
 		messageID bson.ObjectID,
 		now time.Time,
 	) (int64, error)
@@ -64,6 +84,16 @@ func (r *repository) EnsureIndexes(ctx context.Context) error {
 				{Key: "status", Value: 1},
 			},
 			Options: options.Index().SetName("scope_attachments"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "scope", Value: 1},
+				{Key: "uploader_id", Value: 1},
+				{Key: "target_id", Value: 1},
+				{Key: "gig_id", Value: 1},
+				{Key: "status", Value: 1},
+			},
+			Options: options.Index().SetName("provisional_attachments"),
 		},
 		{
 			Keys:    bson.D{{Key: "status", Value: 1}, {Key: "expires_at", Value: 1}},
@@ -143,6 +173,38 @@ func (r *repository) FindReady(
 	return items, nil
 }
 
+func (r *repository) FindReadyProvisional(
+	ctx context.Context,
+	ids []bson.ObjectID,
+	scope Scope,
+	uploaderID string,
+	targetID string,
+	gigID string,
+	now time.Time,
+) ([]Attachment, error) {
+	filter := bson.M{
+		"_id": bson.M{"$in": ids}, "scope": scope,
+		"uploader_id": uploaderID, "target_id": targetID,
+		"provisional": true, "status": StatusReady,
+		"expires_at": bson.M{"$gt": now},
+	}
+	if gigID == "" {
+		filter["gig_id"] = bson.M{"$exists": false}
+	} else {
+		filter["gig_id"] = gigID
+	}
+	cur, err := r.collection.Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var items []Attachment
+	if err := cur.All(ctx, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func (r *repository) MarkAttached(
 	ctx context.Context,
 	ids []bson.ObjectID,
@@ -161,6 +223,43 @@ func (r *repository) MarkAttached(
 			"status": StatusAttached, "message_id": messageID, "updated_at": now,
 		},
 		"$unset": bson.M{"expires_at": ""},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return result.ModifiedCount, nil
+}
+
+func (r *repository) MarkProvisionalAttached(
+	ctx context.Context,
+	ids []bson.ObjectID,
+	scope Scope,
+	uploaderID string,
+	targetID string,
+	gigID string,
+	scopeID bson.ObjectID,
+	messageID bson.ObjectID,
+	now time.Time,
+) (int64, error) {
+	filter := bson.M{
+		"_id": bson.M{"$in": ids}, "scope": scope,
+		"uploader_id": uploaderID, "target_id": targetID,
+		"provisional": true, "status": StatusReady,
+		"expires_at": bson.M{"$gt": now},
+	}
+	if gigID == "" {
+		filter["gig_id"] = bson.M{"$exists": false}
+	} else {
+		filter["gig_id"] = gigID
+	}
+	result, err := r.collection.UpdateMany(ctx, filter, bson.M{
+		"$set": bson.M{
+			"scope_id": scopeID, "status": StatusAttached,
+			"message_id": messageID, "updated_at": now,
+		},
+		"$unset": bson.M{
+			"provisional": "", "target_id": "", "gig_id": "", "expires_at": "",
+		},
 	})
 	if err != nil {
 		return 0, err

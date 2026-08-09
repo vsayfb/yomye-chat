@@ -60,6 +60,7 @@ about only after deployment:
 - unauthenticated private HTTP routes are rejected
 - required MongoDB indexes are actually created
 - attachment READY -> ATTACHED transaction behavior and retry safety
+- attachment-only first messages atomically create and bind direct/application scopes
 - cross-conversation and wrong-uploader attachment reuse is rejected
 - expired/unavailable attachments do not persist a message
 - required `client_message_id`, malformed/empty message, and logical-length checks

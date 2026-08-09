@@ -27,6 +27,51 @@ type uploadRequest struct {
 	DurationMillis   int64  `json:"duration_ms,omitempty"`
 }
 
+type firstContactUploadRequest struct {
+	TargetID         string `json:"target_id"`
+	GigID            string `json:"gig_id,omitempty"`
+	OriginalFilename string `json:"original_filename"`
+	ContentType      string `json:"content_type"`
+	SizeBytes        int64  `json:"size_bytes"`
+	DurationMillis   int64  `json:"duration_ms,omitempty"`
+}
+
+func (h *Handler) AuthorizeFirstDirectUpload(w http.ResponseWriter, r *http.Request) {
+	h.authorizeFirstContactUpload(w, r, ScopeDirect)
+}
+
+func (h *Handler) AuthorizeFirstApplicationUpload(w http.ResponseWriter, r *http.Request) {
+	h.authorizeFirstContactUpload(w, r, ScopeApplication)
+}
+
+func (h *Handler) authorizeFirstContactUpload(
+	w http.ResponseWriter,
+	r *http.Request,
+	scope Scope,
+) {
+	var request firstContactUploadRequest
+	if err := httputil.DecodeJSON(w, r, &request); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	result, err := h.service.AuthorizeFirstContactUpload(
+		r.Context(),
+		FirstContactUploadInput{
+			Scope: scope, UploaderID: middleware.GetUserID(r.Context()),
+			TargetID: request.TargetID, GigID: request.GigID,
+			OriginalName: request.OriginalFilename,
+			ContentType:  request.ContentType, SizeBytes: request.SizeBytes,
+			DurationMillis: request.DurationMillis,
+		},
+	)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusCreated, result)
+}
+
 func (h *Handler) AuthorizeDirectUpload(w http.ResponseWriter, r *http.Request) {
 	h.authorizeUpload(w, r, ScopeDirect, "conversationID")
 }
@@ -107,6 +152,14 @@ func attachmentID(w http.ResponseWriter, r *http.Request) (bson.ObjectID, bool) 
 
 func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, ErrTargetNotFound):
+		httputil.WriteError(w, http.StatusNotFound, "Target user not found")
+	case errors.Is(err, ErrGigNotFound):
+		httputil.WriteError(w, http.StatusNotFound, "Gig not found")
+	case errors.Is(err, ErrDirectMessagesDisabled):
+		httputil.WriteError(w, http.StatusForbidden, "User does not allow social direct messages")
+	case errors.Is(err, ErrScopeAlreadyExists):
+		httputil.WriteError(w, http.StatusConflict, "Conversation already exists; use its attachment upload endpoint")
 	case errors.Is(err, ErrNotFound):
 		httputil.WriteError(w, http.StatusNotFound, "Attachment not found")
 	case errors.Is(err, ErrForbidden):

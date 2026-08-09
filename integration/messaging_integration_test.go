@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -311,6 +312,110 @@ func TestAttachmentCommitIsTransactionalAndRetrySafe(t *testing.T) {
 	}
 	assertCollectionCount(t, env.db.Collection(conversation.MessagesCollection), bson.M{
 		"sender_id": sender, "client_message_id": clientMessageID,
+	}, 1)
+}
+
+func TestFirstDirectMessageMayAtomicallyCreateConversationWithAttachment(t *testing.T) {
+	core := &coreBehavior{AllowDirectMessages: true}
+	env := newTestEnv(t, testEnvOptions{core: core})
+
+	sender := uuid.NewString()
+	target := uuid.NewString()
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	item := &attachment.Attachment{
+		Scope: attachment.ScopeDirect, UploaderID: sender,
+		Provisional: true, TargetID: target,
+		ObjectKey: "chat/pending/direct/test/image.png", OriginalName: "image.png",
+		ContentType: "image/png", SizeBytes: 12, Status: attachment.StatusReady,
+		ExpiresAt: &expiresAt, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := env.attachRepo.Create(context.Background(), item); err != nil {
+		t.Fatalf("seed provisional direct attachment: %v", err)
+	}
+
+	conn, resp, err := dialWebSocket(t, env.server.URL, "/ws/direct", url.Values{
+		"ticket":   []string{env.mustIssueTicket(t, signedAccessToken(t, sender, "sender"))},
+		"targetID": []string{target},
+	}, allowedWebOrigin)
+	if err != nil {
+		t.Fatalf("connect direct first-contact WebSocket: %s", describeDialError(err, resp))
+	}
+	defer conn.Close()
+
+	if err := conn.WriteJSON(map[string]any{
+		"client_message_id": "direct-first-attachment",
+		"attachment_ids":    []string{item.ID.Hex()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ack := readAccepted(t, conn)
+	if ack.ConversationID == "" {
+		t.Fatalf("first attachment acknowledgement had no conversation ID: %+v", ack)
+	}
+
+	persisted, err := env.attachRepo.FindByID(context.Background(), item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted == nil || persisted.Status != attachment.StatusAttached ||
+		persisted.ScopeID.Hex() != ack.ConversationID || persisted.Provisional ||
+		persisted.TargetID != "" || persisted.MessageID == nil ||
+		persisted.MessageID.Hex() != ack.MessageID {
+		t.Fatalf("provisional direct attachment was not atomically bound: %+v", persisted)
+	}
+	assertCollectionCount(t, env.db.Collection(conversation.MessagesCollection), bson.M{
+		"sender_id": sender, "client_message_id": "direct-first-attachment",
+	}, 1)
+}
+
+func TestFirstApplicationMessageMayAtomicallyCreateThreadWithAttachment(t *testing.T) {
+	core := &coreBehavior{}
+	env := newTestEnv(t, testEnvOptions{core: core})
+
+	initiator := uuid.NewString()
+	target := uuid.NewString()
+	gigID := uuid.NewString()
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	item := &attachment.Attachment{
+		Scope: attachment.ScopeApplication, UploaderID: initiator,
+		Provisional: true, TargetID: target, GigID: gigID,
+		ObjectKey: "chat/pending/application/test/image.png", OriginalName: "image.png",
+		ContentType: "image/png", SizeBytes: 12, Status: attachment.StatusReady,
+		ExpiresAt: &expiresAt, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := env.attachRepo.Create(context.Background(), item); err != nil {
+		t.Fatalf("seed provisional application attachment: %v", err)
+	}
+
+	conn := connectApplicationParticipants(
+		t, env,
+		env.mustIssueTicket(t, signedAccessToken(t, initiator, "initiator")),
+		target, gigID,
+	)
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{
+		"client_message_id": "application-first-attachment",
+		"attachment_ids":    []string{item.ID.Hex()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ack := readAccepted(t, conn)
+	if ack.ThreadID == "" {
+		t.Fatalf("first attachment acknowledgement had no thread ID: %+v", ack)
+	}
+
+	persisted, err := env.attachRepo.FindByID(context.Background(), item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted == nil || persisted.Status != attachment.StatusAttached ||
+		persisted.ScopeID.Hex() != ack.ThreadID || persisted.Provisional ||
+		persisted.TargetID != "" || persisted.GigID != "" ||
+		persisted.MessageID == nil || persisted.MessageID.Hex() != ack.MessageID {
+		t.Fatalf("provisional application attachment was not atomically bound: %+v", persisted)
+	}
+	assertCollectionCount(t, env.db.Collection(application.MessagesCollection), bson.M{
+		"sender_id": initiator, "client_message_id": "application-first-attachment",
 	}, 1)
 }
 

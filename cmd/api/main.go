@@ -17,6 +17,8 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/gorilla/websocket"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/vsayfb/gig-platform-chat-service/config"
 	"github.com/vsayfb/gig-platform-chat-service/hub"
@@ -242,8 +244,82 @@ func main() {
 			return attachment.ErrInvalidInput
 		}
 	}
+	authorizeFirstAttachment := func(
+		ctx context.Context,
+		scope attachment.Scope,
+		uploaderID string,
+		targetID string,
+		gigID string,
+	) error {
+		if uploaderID == "" || targetID == "" || uploaderID == targetID {
+			return attachment.ErrInvalidInput
+		}
+		userResponse, err := userClient.GetUser(ctx, targetID)
+		if status.Code(err) == codes.NotFound {
+			return attachment.ErrTargetNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if userResponse == nil || userResponse.GetUser() == nil ||
+			userResponse.GetUser().GetId() != targetID {
+			return errors.New("Core GetUser returned missing or mismatched target")
+		}
+
+		switch scope {
+		case attachment.ScopeDirect:
+			if gigID != "" {
+				return attachment.ErrInvalidInput
+			}
+			exists, err := conversationSvc.DirectConversationExists(
+				ctx, uploaderID, targetID,
+			)
+			if err != nil {
+				return err
+			}
+			if exists {
+				return attachment.ErrScopeAlreadyExists
+			}
+			allowed, err := userClient.AllowsSocialDirectMessages(ctx, targetID)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				return attachment.ErrDirectMessagesDisabled
+			}
+			return nil
+
+		case attachment.ScopeApplication:
+			if gigID == "" {
+				return attachment.ErrInvalidInput
+			}
+			gigResponse, err := gigClient.GetGig(ctx, gigID)
+			if status.Code(err) == codes.NotFound {
+				return attachment.ErrGigNotFound
+			}
+			if err != nil {
+				return err
+			}
+			if gigResponse == nil || gigResponse.GetGig() == nil {
+				return errors.New("Core GetGig returned no gig")
+			}
+			exists, err := applicationSvc.ApplicationExists(
+				ctx, gigID, uploaderID, targetID,
+			)
+			if err != nil {
+				return err
+			}
+			if exists {
+				return attachment.ErrScopeAlreadyExists
+			}
+			return nil
+		default:
+			return attachment.ErrInvalidInput
+		}
+	}
 	attachmentSvc := attachment.NewService(
-		attachmentRepo, r2Client, mongoClient, authorizeAttachment,
+		attachmentRepo, r2Client, mongoClient,
+		authorizeAttachment, authorizeFirstAttachment,
 	)
 	attachmentHandler := attachment.NewHandler(attachmentSvc)
 
@@ -365,6 +441,10 @@ func main() {
 
 	r.Route("/applications", func(r chi.Router) {
 		r.Use(authMiddleware)
+		r.With(httpWriteRateLimit).Post(
+			"/attachments/uploads",
+			attachmentHandler.AuthorizeFirstApplicationUpload,
+		)
 		r.With(httpReadRateLimit).Get("/me", applicationHandler.ListApplications)
 		r.With(httpReadRateLimit).Get("/{threadID}", applicationHandler.GetApplication)
 		r.With(httpReadRateLimit).Get("/{threadID}/messages", applicationHandler.ListMessages)
@@ -378,6 +458,10 @@ func main() {
 
 	r.Route("/conversations", func(r chi.Router) {
 		r.Use(authMiddleware)
+		r.With(httpWriteRateLimit).Post(
+			"/attachments/uploads",
+			attachmentHandler.AuthorizeFirstDirectUpload,
+		)
 		r.With(httpReadRateLimit).Get("/me", conversationHandler.List)
 		r.With(httpReadRateLimit).Get("/{conversationID}", conversationHandler.Get)
 		r.With(httpReadRateLimit).Get("/{conversationID}/messages", conversationHandler.ListMessages)

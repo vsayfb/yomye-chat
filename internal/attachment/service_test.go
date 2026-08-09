@@ -38,6 +38,91 @@ func TestAuthorizeUploadCreatesPendingRecordBeforePresigning(t *testing.T) {
 	}
 }
 
+func TestAuthorizeFirstContactUploadRejectsMissingTargetBeforeSigning(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo}
+	service := newTestService(repo, store)
+	service.authorizeFirst = func(
+		context.Context, Scope, string, string, string,
+	) error {
+		return ErrTargetNotFound
+	}
+
+	_, err := service.AuthorizeFirstContactUpload(
+		context.Background(),
+		FirstContactUploadInput{
+			Scope: ScopeDirect, UploaderID: "sender", TargetID: "missing",
+			OriginalName: "photo.jpg", ContentType: "image/jpeg", SizeBytes: 1024,
+		},
+	)
+	if !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("AuthorizeFirstContactUpload() error = %v, want target not found", err)
+	}
+	if store.uploadCalls != 0 || len(repo.items) != 0 {
+		t.Fatalf("missing target created private upload state: calls=%d items=%d",
+			store.uploadCalls, len(repo.items))
+	}
+}
+
+func TestAuthorizeFirstContactUploadRejectsExistingScopeBeforeSigning(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo}
+	service := newTestService(repo, store)
+	service.authorizeFirst = func(
+		context.Context, Scope, string, string, string,
+	) error {
+		return ErrScopeAlreadyExists
+	}
+
+	_, err := service.AuthorizeFirstContactUpload(
+		context.Background(),
+		FirstContactUploadInput{
+			Scope: ScopeDirect, UploaderID: "sender", TargetID: "target",
+			OriginalName: "photo.jpg", ContentType: "image/jpeg", SizeBytes: 1024,
+		},
+	)
+	if !errors.Is(err, ErrScopeAlreadyExists) {
+		t.Fatalf("AuthorizeFirstContactUpload() error = %v, want existing scope", err)
+	}
+	if store.uploadCalls != 0 || len(repo.items) != 0 {
+		t.Fatalf("existing scope created private upload state: calls=%d items=%d",
+			store.uploadCalls, len(repo.items))
+	}
+}
+
+func TestAuthorizeFirstContactUploadCreatesProvisionalBinding(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo}
+	service := newTestService(repo, store)
+	result, err := service.AuthorizeFirstContactUpload(
+		context.Background(),
+		FirstContactUploadInput{
+			Scope: ScopeApplication, UploaderID: "sender", TargetID: "target",
+			GigID: "gig", OriginalName: "photo.jpg",
+			ContentType: "image/jpeg", SizeBytes: 1024,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := repo.items[result.AttachmentID]
+	if item == nil || !item.Provisional || !item.ScopeID.IsZero() ||
+		item.TargetID != "target" || item.GigID != "gig" ||
+		!strings.HasPrefix(item.ObjectKey, "chat/pending/application/") {
+		t.Fatalf("unexpected provisional attachment: %+v", item)
+	}
+	if store.uploadCalls != 1 || store.presignedBeforeCreate {
+		t.Fatalf("authorization ordering was unsafe: calls=%d before_create=%t",
+			store.uploadCalls, store.presignedBeforeCreate)
+	}
+}
+
 func TestAuthorizeUploadEnforcesMediaLimits(t *testing.T) {
 	t.Parallel()
 
@@ -161,9 +246,20 @@ func (r *fakeRepository) FindReady(
 ) ([]Attachment, error) {
 	return nil, nil
 }
+func (r *fakeRepository) FindReadyProvisional(
+	context.Context, []bson.ObjectID, Scope, string, string, string, time.Time,
+) ([]Attachment, error) {
+	return nil, nil
+}
 func (r *fakeRepository) MarkAttached(
 	context.Context, []bson.ObjectID, Scope, bson.ObjectID, string,
 	bson.ObjectID, time.Time,
+) (int64, error) {
+	return 0, nil
+}
+func (r *fakeRepository) MarkProvisionalAttached(
+	context.Context, []bson.ObjectID, Scope, string, string, string,
+	bson.ObjectID, bson.ObjectID, time.Time,
 ) (int64, error) {
 	return 0, nil
 }
@@ -188,6 +284,7 @@ type fakeStore struct {
 	downloadCalls         int
 	deleteCalls           int
 	deleteErr             error
+	uploadCalls           int
 }
 
 func (s *fakeStore) NewObjectKey(scope, contentType string) (string, error) {
@@ -201,6 +298,7 @@ func (s *fakeStore) PresignUpload(
 	_ context.Context,
 	request r2.UploadRequest,
 ) (*r2.UploadAuthorization, error) {
+	s.uploadCalls++
 	found := false
 	for _, item := range s.repo.items {
 		if item.ObjectKey == request.Key {
@@ -234,6 +332,7 @@ func newTestService(repo Repository, store ObjectStore) *Service {
 	service := NewService(
 		repo, store, nil,
 		func(context.Context, Scope, bson.ObjectID, string) error { return nil },
+		func(context.Context, Scope, string, string, string) error { return nil },
 	)
 	fixed := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return fixed }
