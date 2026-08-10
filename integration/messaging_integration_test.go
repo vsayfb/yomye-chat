@@ -801,6 +801,41 @@ func TestOfflineIdempotentRetryPublishesNotificationOnce(t *testing.T) {
 	}, 1)
 }
 
+func TestEveryOfflineAcceptedApplicationMessagePublishesNotification(t *testing.T) {
+	env := newTestEnv(t, testEnvOptions{})
+	initiator := uuid.NewString()
+	target := uuid.NewString()
+	app := env.seedApplication(
+		t, initiator, target, uuid.NewString(), application.ApplicationStatusAccepted,
+	)
+
+	conn := connectApplicationThread(
+		t, env,
+		env.mustIssueTicket(t, signedAccessToken(t, initiator, "initiator")),
+		app.ID.Hex(),
+	)
+	defer conn.Close()
+
+	for i, clientID := range []string{"offline-application-one", "offline-application-two"} {
+		if err := conn.WriteJSON(map[string]any{
+			"client_message_id": clientID,
+			"content":           "offline application message",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_ = readAccepted(t, conn)
+
+		want := int64(i + 1)
+		deadline := time.Now().Add(2 * time.Second)
+		for env.sqsRequests.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if got := env.sqsRequests.Load(); got != want {
+			t.Fatalf("offline application notifications = %d, want %d", got, want)
+		}
+	}
+}
+
 func TestApplicationAndDirectChannelsDoNotCrossDeliver(t *testing.T) {
 	env := newTestEnv(t, testEnvOptions{})
 	alice := uuid.NewString()

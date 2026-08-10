@@ -623,9 +623,8 @@ func (h *WSHandler) handleMessage(
 	}
 
 	var (
-		msg         *application.Message
-		isNewThread bool
-		replayed    bool
+		msg      *application.Message
+		replayed bool
 	)
 	err = h.attachmentSvc.CommitMessage(
 		ctx, attachment.ScopeApplication, threadID,
@@ -634,7 +633,7 @@ func (h *WSHandler) handleMessage(
 			bson.ObjectID, bson.ObjectID, bool, error,
 		) {
 			var sendErr error
-			msg, isNewThread, replayed, sendErr = h.applicationSvc.SendMessage(
+			msg, _, replayed, sendErr = h.applicationSvc.SendMessage(
 				txCtx, sender.ID, receiver.ID, gig.ID, clientMessageID, content, refs,
 			)
 			if sendErr != nil {
@@ -711,14 +710,9 @@ func (h *WSHandler) handleMessage(
 	}
 	span.SetAttributes(attribute.String("message.delivery", "offline"))
 
-	// Recipient is offline. Only publish a notification event when this
-	// message just created the thread — i.e. a brand-new application the
-	// target hasn't seen yet. Subsequent messages in an existing thread no
-	// longer trigger an SQS publish.
-	if !isNewThread {
-		span.SetAttributes(attribute.Bool("notification.required", false))
-		return
-	}
+	// Recipient has no application-channel socket that can receive the message.
+	// Publish for every newly persisted offline message; idempotent replays have
+	// already returned above and therefore cannot publish a duplicate event.
 	span.SetAttributes(attribute.Bool("notification.required", true))
 
 	event := mysqs.Envelope{

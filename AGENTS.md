@@ -395,12 +395,22 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   and use a non-nil UUID in `sub`. Core refresh tokens remain opaque 64-character
   hexadecimal values whose SHA-256 hashes are stored by Core, so they cannot be
   parsed as access JWTs. Keep Chat's verifier aligned with this Core contract.
-- **Durable notification outbox — accepted open decision.** Message persistence
+- **Durable notification outbox — explicitly deferred.** Message persistence
   remains authoritative and SQS notification publishing remains best effort
-  after the message is durable. An SQS failure must not make the client retry a
-  successfully stored message. This means an offline notification can be lost.
-  That reliability trade-off is accepted for now; revisit an outbox/durable
-  retry design before stronger production notification guarantees are required.
+  after the message is durable. Every newly persisted direct or application
+  message attempts to publish an event when no relevant recipient socket accepts
+  live delivery; idempotent message retries do not intentionally publish twice.
+  MongoDB message persistence and SQS publishing are not atomic. An SQS error, a
+  process crash after the MongoDB commit, or shutdown during that gap can leave a
+  durable message with no push notification and no durable notification retry
+  record. The message must still be acknowledged, and an SQS failure must never
+  cause the client to retry a successfully stored message. This loss window is an
+  accepted product/reliability trade-off for now, not a correctness guarantee.
+  Before stronger production notification guarantees are required, implement a
+  transactional MongoDB outbox written with the message, a background publisher
+  with durable retry/backoff state, and consumer idempotency keyed by durable
+  `message_id`. That future design provides eventual at-least-once publication,
+  so the Lambda must tolerate duplicate SQS events even after an outbox exists.
 - **Durable `client_message_id` idempotency — implemented.** Every WebSocket
   message send requires a 1-128 byte client-generated ID. Chat stores that ID on
   the durable message and has a unique `(sender_id, client_message_id)` index in
