@@ -12,7 +12,8 @@ COPY . .
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -o bin/chat-service ./cmd/api
+    go build -o bin/chat-service ./cmd/api && \
+    go build -o bin/chat ./cmd/smoke
 
 FROM alpine:3.21
 
@@ -21,6 +22,7 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /app
 
 COPY --from=builder /app/bin/chat-service ./chat-service
+COPY --from=builder /app/bin/chat ./chat
 
 EXPOSE 8081
 

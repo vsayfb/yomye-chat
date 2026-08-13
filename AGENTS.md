@@ -662,6 +662,15 @@ tests around every security boundary.
 
 Chat uses two distinct test layers and they must not be conflated:
 
+The deployed Chat smoke runner is documented in `docs/SMOKE_TEST.md`. It consumes
+exactly 15 Core-owned identities through a versioned stdin manifest, never mints
+Core credentials, and is restricted to explicit `local` or `staging` runs. Keep
+credentials memory-only and all smoke diagnostics free of tokens, tickets,
+Authorization headers, and private message bodies.
+Local `make smoke-local` requires the explicit `CORE_SMOKE_RUN_ID` of a cohort
+whose Core smoke run already completed. It must never generate a run ID, invoke
+Core's smoke setup, query Core persistence, or store the piped manifest.
+
 - **Unit tests:** package-local isolation tests. Mocks/fakes/stubs are allowed when
   they make the unit boundary explicit and keep tests deterministic.
 - **Integration tests:** exercise real Chat-owned infrastructure and real protocol

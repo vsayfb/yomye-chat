@@ -83,6 +83,8 @@ about only after deployment:
 - per-user ticket, HTTP read/write, and WebSocket message rate-limit isolation
 - rate-limited WebSocket frames are rejected before persistence
 - `/ready` remains outside application rate limits
+- deployable smoke runner behavior through real HTTP/WebSocket handlers,
+  including third-user isolation and same-run idempotent reuse
 
 Every persistence-sensitive test checks MongoDB state directly. A successful HTTP
 or WebSocket response alone is not considered evidence that a durability or
