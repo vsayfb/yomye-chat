@@ -21,12 +21,13 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, _ io.Writer) error {
 	if len(args) < 2 || args[0] != "smoke" || args[1] != "run" {
-		return errors.New("usage: chat smoke run --run-id <id> --target <origin> --environment <local|staging> --credentials-stdin [--timeout 10m]")
+		return errors.New("usage: chat smoke run --run-id <id> --target <chat-origin> --core-target <core-origin> --environment <local|staging> --credentials-stdin [--timeout 10m]")
 	}
 	flags := flag.NewFlagSet("chat smoke run", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	runID := flags.String("run-id", "", "stable deployment/run identifier")
 	target := flags.String("target", "", "Chat HTTP origin")
+	coreTarget := flags.String("core-target", "", "Core HTTP origin")
 	environment := flags.String("environment", "", "local or staging")
 	credentialsStdin := flags.Bool("credentials-stdin", false, "read Core credentials from stdin")
 	timeout := flags.Duration("timeout", 10*time.Minute, "overall smoke timeout")
@@ -57,9 +58,13 @@ func run(args []string, stdin io.Reader, stdout, _ io.Writer) error {
 	if err != nil {
 		return err
 	}
+	coreClient, err := smoke.NewCoreClient(*coreTarget, min(*timeout, 30*time.Second))
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	summary, err := smoke.Run(ctx, client, manifest)
+	summary, err := smoke.Run(ctx, client, coreClient, manifest)
 	if err != nil {
 		return err
 	}

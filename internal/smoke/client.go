@@ -51,12 +51,14 @@ type Accepted struct {
 	ClientMessageID string    `json:"client_message_id"`
 	MessageID       string    `json:"message_id"`
 	ConversationID  string    `json:"conversation_id"`
+	ThreadID        string    `json:"thread_id"`
 	SentAt          time.Time `json:"sent_at"`
 }
 
 type Delivery struct {
 	Type           string    `json:"type"`
 	ConversationID string    `json:"conversation_id"`
+	ThreadID       string    `json:"thread_id"`
 	SenderID       string    `json:"sender_id"`
 	Content        string    `json:"content"`
 	SentAt         time.Time `json:"sent_at"`
@@ -69,15 +71,10 @@ type wsError struct {
 }
 
 func NewClient(rawTarget string, timeout time.Duration) (*Client, error) {
-	target, err := url.Parse(rawTarget)
-	if err != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") {
-		return nil, errors.New("--target must be an absolute http or https origin")
+	target, err := parseOrigin(rawTarget)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --target: %w", err)
 	}
-	if target.User != nil || target.RawQuery != "" || target.Fragment != "" ||
-		(target.Path != "" && target.Path != "/") {
-		return nil, errors.New("--target must contain only scheme, host, and optional port")
-	}
-	target.Path = ""
 	return &Client{
 		target: target,
 		http: &http.Client{
@@ -274,7 +271,7 @@ func ReadAccepted(conn *websocket.Conn, timeout time.Duration) (*Accepted, error
 		return nil, fmt.Errorf("decode accepted event: %w", err)
 	}
 	if accepted.Type != "message.accepted" || accepted.MessageID == "" ||
-		accepted.ConversationID == "" || accepted.SentAt.IsZero() {
+		(accepted.ConversationID == "" && accepted.ThreadID == "") || accepted.SentAt.IsZero() {
 		return nil, errors.New("message.accepted event is malformed")
 	}
 	return &accepted, nil

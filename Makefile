@@ -2,6 +2,7 @@
 
 CORE_SMOKE_RUN_ID ?=
 CHAT_SMOKE_TARGET ?= http://127.0.0.1:8081
+CHAT_CORE_TARGET ?= http://core_svc:8080
 CHAT_SMOKE_TIMEOUT ?= 10m
 
 export DOCKER_BUILDKIT=1
@@ -69,9 +70,10 @@ smoke-local:
 		exit 2)
 	@docker exec core_svc ./core smoke credentials \
 		--run-id "$(CORE_SMOKE_RUN_ID)" | \
-	docker exec -i chat-service ./chat smoke run \
+	docker exec -i chat-svc ./chat smoke run \
 		--run-id "$(CORE_SMOKE_RUN_ID)" \
 		--target "$(CHAT_SMOKE_TARGET)" \
+		--core-target "$(CHAT_CORE_TARGET)" \
 		--environment local \
 		--credentials-stdin \
 		--timeout "$(CHAT_SMOKE_TIMEOUT)"

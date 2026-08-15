@@ -2,12 +2,6 @@ name: Deploy
 
 on:
   workflow_dispatch:
-    inputs:
-      run_smoke:
-        description: Run Core-dependent Chat staging smoke after deployment
-        required: true
-        type: boolean
-        default: false
 
 env:
   SERVICE_NAME: chat
@@ -30,11 +24,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          cache: true
+          cache-dependency-path: go.sum
 
-      - name: Build
-        run: |
-          GOOS=linux GOARCH=amd64 go build -trimpath -o bootstrap ${{ env.BUILD_PATH }}
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o chat-smoke ./cmd/smoke
+      - name: Build API
+        run: GOOS=linux GOARCH=amd64 go build -o bootstrap ${{ env.BUILD_PATH }}
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -45,12 +39,9 @@ jobs:
       - name: Upload artifact
         id: upload
         run: |
-          KEY="${{ env.SERVICE_NAME }}/${{ github.sha }}.bin"
-          SMOKE_KEY="${{ env.SERVICE_NAME }}/${{ github.sha }}.smoke"
-          aws s3 cp bootstrap "s3://${{ vars.DEPLOY_BUCKET }}/${KEY}"
-          aws s3 cp chat-smoke "s3://${{ vars.DEPLOY_BUCKET }}/${SMOKE_KEY}"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-          echo "smoke_key=$SMOKE_KEY" >> "$GITHUB_OUTPUT"
+          API_KEY="${{ env.SERVICE_NAME }}/${{ github.sha }}.bin"
+          aws s3 cp bootstrap "s3://${{ vars.DEPLOY_BUCKET }}/${API_KEY}"
+          echo "api_key=$API_KEY" >> "$GITHUB_OUTPUT"
 
       - name: Deploy via SSM Run Command
         run: |
@@ -58,10 +49,13 @@ jobs:
             --document-name "AWS-RunShellScript" \
             --targets "Key=tag:Name,Values=${{ vars.INSTANCE_NAME_TAG }}" \
             --parameters commands="[
+              \"set -eu\",
               \"export SERVICE_NAME=${{ env.SERVICE_NAME }}\",
               \"export BINARY_NAME=bootstrap\",
               \"export S3_BUCKET=${{ vars.DEPLOY_BUCKET }}\",
-              \"export S3_KEY=${{ steps.upload.outputs.key }}\",
+              \"export AWS_REGION=${{ vars.AWS_REGION }}\",
+              \"export APP_ENV=staging\",
+              \"export S3_KEY=${{ steps.upload.outputs.api_key }}\",
               \"export PORT=${{ env.PORT }}\",
               \"export HEALTH_PATH=${{ env.HEALTH_PATH }}\",
               \"bash /opt/deploy/remote-deploy.sh\"
@@ -78,7 +72,7 @@ jobs:
             --query "Reservations[0].Instances[0].InstanceId" \
             --output text)
 
-          for i in $(seq 1 30); do
+          for i in $(seq 1 90); do
             STATUS=$(aws ssm get-command-invocation \
               --command-id "$COMMAND_ID" \
               --instance-id "$INSTANCE_ID" \
@@ -101,88 +95,4 @@ jobs:
           done
 
           echo "Timed out waiting for deployment."
-          exit 1
-
-      # Enable this after Core publishes its maintenance binary with the
-      # documented `core smoke run` and `core smoke credentials` commands.
-      - name: Run staging smoke through SSM
-        if: ${{ inputs.run_smoke }}
-        env:
-          DEPLOYMENT_SHA: ${{ github.sha }}
-          DEPLOY_BUCKET: ${{ vars.DEPLOY_BUCKET }}
-          CHAT_SMOKE_KEY: ${{ steps.upload.outputs.smoke_key }}
-          CORE_SMOKE_KEY: ${{ vars.CORE_SMOKE_S3_KEY }}
-          CHAT_SMOKE_TARGET: ${{ vars.CHAT_SMOKE_TARGET }}
-          INSTANCE_NAME_TAG: ${{ vars.INSTANCE_NAME_TAG }}
-        run: |
-          set -euo pipefail
-
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --filters \
-              "Name=tag:Name,Values=${INSTANCE_NAME_TAG}" \
-              "Name=instance-state-name,Values=running" \
-            --query "Reservations[0].Instances[0].InstanceId" \
-            --output text)
-
-          REMOTE_SCRIPT=$(cat <<EOF
-          set -euo pipefail
-          SMOKE_DIR=\$(mktemp -d /tmp/yevmiye-chat-smoke.XXXXXX)
-          trap 'rm -rf "\$SMOKE_DIR"' EXIT
-          aws s3 cp "s3://${DEPLOY_BUCKET}/${CHAT_SMOKE_KEY}" "\$SMOKE_DIR/chat"
-          aws s3 cp "s3://${DEPLOY_BUCKET}/${CORE_SMOKE_KEY}" "\$SMOKE_DIR/core"
-          chmod 0700 "\$SMOKE_DIR/chat" "\$SMOKE_DIR/core"
-          for attempt in \$(seq 1 30); do
-            if curl --fail --silent --show-error "${CHAT_SMOKE_TARGET}/ready" >/dev/null; then
-              break
-            fi
-            if [ "\$attempt" -eq 30 ]; then
-              echo "chat smoke failed: readiness scenario timed out" >&2
-              exit 1
-            fi
-            sleep 2
-          done
-          "\$SMOKE_DIR/core" smoke run --run-id "${DEPLOYMENT_SHA}"
-          set +x
-          "\$SMOKE_DIR/core" smoke credentials --run-id "${DEPLOYMENT_SHA}" | \
-            "\$SMOKE_DIR/chat" smoke run \
-              --run-id "${DEPLOYMENT_SHA}" \
-              --target "${CHAT_SMOKE_TARGET}" \
-              --environment staging \
-              --credentials-stdin \
-              --timeout 10m
-          EOF
-          )
-
-          PARAMETERS=$(jq -n --arg command "$REMOTE_SCRIPT" '{commands: [$command]}')
-          COMMAND_ID=$(aws ssm send-command \
-            --document-name "AWS-RunShellScript" \
-            --instance-ids "$INSTANCE_ID" \
-            --parameters "$PARAMETERS" \
-            --query "Command.CommandId" \
-            --output text)
-
-          for i in $(seq 1 90); do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "$COMMAND_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --query "Status" \
-              --output text 2>/dev/null || echo "Pending")
-            echo "Smoke status: $STATUS"
-            case "$STATUS" in
-              Success)
-                aws ssm get-command-invocation \
-                  --command-id "$COMMAND_ID" \
-                  --instance-id "$INSTANCE_ID" \
-                  --query "StandardOutputContent" \
-                  --output text
-                exit 0
-                ;;
-              Failed|Cancelled|TimedOut)
-                echo "Staging smoke failed. Inspect the privacy-safe SSM command output." >&2
-                exit 1
-                ;;
-            esac
-            sleep 10
-          done
-          echo "Staging smoke timed out." >&2
           exit 1

@@ -1,7 +1,8 @@
 # Chat Local and Staging Smoke Test
 
-The Chat smoke runner validates the deployed private direct-message path using
-real Core-owned identities and real Chat HTTP/WebSocket interfaces. It never
+The Chat smoke runner validates the deployed listing/application conversation
+path using real Core-owned identities, a real Core listing, and real Chat
+HTTP/WebSocket interfaces. It never
 creates Core users, signs Core JWTs, queries Core PostgreSQL, writes credentials
 to disk, or adds a test authentication path to Chat.
 
@@ -34,9 +35,9 @@ Requirements for Core's future `smoke credentials` command:
   access token should no longer be used.
 - Issue normal Core HS256 access JWTs with `iss=yevmiye-core`,
   `token_use=access`, matching UUID subjects, and valid expiries.
-- Ensure the selected cohort can establish social direct conversations. Chat
-  enforces `allow_social_direct_messages` through Core's existing `GetUsers`
-  contract; the smoke runner does not bypass this preference.
+- Ensure the completed Core smoke run has open gig listings owned by cohort
+  users. Chat discovers them through Core's public `/core/listings` API; it does
+  not query Core persistence or require social direct-message permission.
 - Print only the JSON manifest to stdout. Operational diagnostics belong on
   stderr and must not contain tokens.
 
@@ -78,6 +79,7 @@ Optional Chat overrides:
 make smoke-local \
   CORE_SMOKE_RUN_ID=local-002 \
   CHAT_SMOKE_TARGET=http://127.0.0.1:8081 \
+  CHAT_CORE_TARGET=http://core_svc:8080 \
   CHAT_SMOKE_TIMEOUT=15m
 ```
 
@@ -97,24 +99,29 @@ query Core PostgreSQL or invent a fallback.
 
 ## Scenarios
 
-The runner uses the first three manifest users and:
+The runner uses at least three manifest users and:
 
-1. Reuses or creates the unique direct conversation for users A and B.
-2. Sends deterministic Turkish messages in both directions.
-3. Verifies real-time delivery for messages newly created in that run.
-4. Retrieves durable history as user B and verifies conversation, sender, and
+1. Queries Core's public listing feed for a real open Turkish gig owned by a
+   cohort user; that owner becomes user B and user A becomes the applicant.
+2. Reuses or creates the application thread for the exact users and listing.
+3. Sends a deterministic Turkish application message from A to B.
+4. Approves the pending application through Chat as listing owner B.
+5. Sends a deterministic Turkish reply from B to A.
+6. Verifies real-time delivery for messages newly created in that run.
+7. Retrieves durable history as user B and verifies thread, listing, sender, and
    recipient identities plus ordering.
-5. Retries both stable `client_message_id` values and verifies the durable IDs
+8. Retries both stable `client_message_id` values and verifies the durable IDs
    do not change and history contains no duplicates.
-6. Reads history through the composite `(sent_at, _id)` pagination cursor.
-7. Verifies user C receives `403` through HTTP and cannot open the conversation
+9. Reads history through the composite `(sent_at, _id)` pagination cursor.
+10. Verifies user C receives `403` through HTTP and cannot open the application
    WebSocket, preventing both reads and message mutation.
-8. Reconnects through a new one-time ticket and verifies history remains
+11. Reconnects through a new one-time ticket and verifies history remains
    available.
 
-The first-contact WebSocket authorization exercises Chat's real Core `GetUsers`
-summary lookup and privacy preference. Chat has no unread/read state, delivery
-receipts, or read-receipt endpoint, so the runner does not invent those checks.
+The first-contact WebSocket authorization exercises Chat's real Core `GetUser`
+and `GetGig` gRPC lookups. Chat persists an `is_read` field but exposes no
+unread/read transition or read-receipt endpoint, so the runner does not invent
+those checks.
 
 On a repeated run ID, the stable message IDs replay rather than rebroadcast.
 The runner validates persistence and idempotency and reports `realtime=0` for
