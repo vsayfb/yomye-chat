@@ -109,7 +109,6 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	}
 	s3Client := s3.NewFromConfig(awsConfig, func(options *s3.Options) {
 		options.BaseEndpoint = aws.String(endpoint)
-		options.UsePathStyle = true
 	})
 	return &Client{
 		cfg: cfg, objects: s3Client, presign: s3.NewPresignClient(s3Client),

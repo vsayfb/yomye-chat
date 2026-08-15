@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,34 @@ import (
 	awsv4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
+
+func TestNewPresignsCloudflareVirtualHostedBucketURL(t *testing.T) {
+	client, err := New(context.Background(), Config{
+		AccountID:   "0123456789abcdef0123456789abcdef",
+		AccessKeyID: "access", SecretAccessKey: "secret",
+		Bucket: "private-chat", ObjectPrefix: "chat",
+		UploadURLExpiry: time.Minute, DownloadURLExpiry: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	authorization, err := client.PresignUpload(context.Background(), UploadRequest{
+		Key: "chat/conversations/id/object.png", ContentType: "image/png",
+		SizeBytes: 1, MaxSizeBytes: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(authorization.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHost := "private-chat.0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com"
+	if parsed.Host != wantHost || parsed.Path != "/chat/conversations/id/object.png" {
+		t.Fatalf("presigned R2 URL = %q, want host %q with object-only path", authorization.URL, wantHost)
+	}
+}
 
 type objectStub struct {
 	head      *s3.HeadObjectOutput
