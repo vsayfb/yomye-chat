@@ -31,6 +31,7 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/awsclient"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/database"
+	"github.com/vsayfb/gig-platform-chat-service/pkg/gcppubsub"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/grpcclient"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/jwt"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/logger"
@@ -327,19 +328,29 @@ func main() {
 
 	jwtSvc := jwt.New(cfg.JWTSecret)
 
-	awsClient, err := awsclient.New(ctx, cfg)
-	if err != nil {
-		slog.Error("failed to initialize aws client", "err", err)
-		os.Exit(1)
+	var notificationPublisher interface {
+		PublishNewMessage(context.Context, sqs.Envelope) error
 	}
-
-	slog.InfoContext(ctx, "aws client initialized")
-
-	sqsClient := sqs.NewSQS(awsClient, cfg)
-	sqsPublisher := sqs.NewPublisher(
-		sqsClient,
-		cfg.AWS.SQSNotificationQueueURL,
-	)
+	closeNotificationPublisher := func() error { return nil }
+	if cfg.AppEnv == config.EnvironmentProduction {
+		publisher, err := gcppubsub.New(ctx, cfg.GCP.ProjectID, cfg.GCP.NotificationTopicName)
+		if err != nil {
+			slog.Error("failed to initialize Pub/Sub publisher", "err", err)
+			os.Exit(1)
+		}
+		notificationPublisher = publisher
+		closeNotificationPublisher = publisher.Close
+		slog.InfoContext(ctx, "Pub/Sub publisher initialized")
+	} else {
+		awsClient, err := awsclient.New(ctx, cfg)
+		if err != nil {
+			slog.Error("failed to initialize aws client", "err", err)
+			os.Exit(1)
+		}
+		sqsClient := sqs.NewSQS(awsClient, cfg)
+		notificationPublisher = sqs.NewPublisher(sqsClient, cfg.AWS.SQSNotificationQueueURL)
+		slog.InfoContext(ctx, "aws client initialized")
+	}
 
 	httpReadLimiter := ratelimit.New(
 		cfg.RateLimits.HTTPReadPerMinute, time.Minute, cfg.RateLimits.HTTPReadBurst,
@@ -361,7 +372,7 @@ func main() {
 		applicationSvc,
 		conversationSvc,
 		attachmentSvc,
-		sqsPublisher,
+		notificationPublisher,
 		userClient,
 		gigClient,
 		cfg.AppEnv == config.EnvironmentDevelopment,
@@ -539,6 +550,10 @@ func main() {
 
 	if err := mongoClient.Disconnect(shutdownCtx); err != nil {
 		slog.Error("failed to disconnect MongoDB", "err", err)
+	}
+
+	if err := closeNotificationPublisher(); err != nil {
+		slog.Error("failed to close notification publisher", "err", err)
 	}
 
 	if err := telemetryState.shutdownTelemetry(shutdownCtx); err != nil {

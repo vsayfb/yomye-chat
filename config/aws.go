@@ -204,6 +204,14 @@ func mustParseRatio(s string) float64 {
 }
 
 func mustParseAllowedOrigins(value string) []string {
+	origins, err := parseAllowedOrigins(value)
+	if err != nil {
+		panic(err)
+	}
+	return origins
+}
+
+func parseAllowedOrigins(value string) ([]string, error) {
 	parts := strings.Split(value, ",")
 	origins := make([]string, 0, len(parts))
 	seen := make(map[string]struct{}, len(parts))
@@ -211,7 +219,7 @@ func mustParseAllowedOrigins(value string) []string {
 	for _, part := range parts {
 		origin, err := canonicalOrigin(strings.TrimSpace(part))
 		if err != nil {
-			panic(fmt.Sprintf("invalid websocket origin %q: %v", part, err))
+			return nil, fmt.Errorf("invalid websocket origin %q: %w", part, err)
 		}
 		if _, ok := seen[origin]; ok {
 			continue
@@ -221,10 +229,10 @@ func mustParseAllowedOrigins(value string) []string {
 	}
 
 	if len(origins) == 0 {
-		panic("websocket allowed origins must not be empty")
+		return nil, fmt.Errorf("websocket allowed origins must not be empty")
 	}
 
-	return origins
+	return origins, nil
 }
 
 func canonicalOrigin(value string) (string, error) {

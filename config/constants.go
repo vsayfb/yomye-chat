@@ -20,6 +20,8 @@ const (
 	EnvUserServiceGRPCAddr  = "USER_SERVICE_GRPC_ADDR"
 	EnvOTelCollectorAddr    = "OTEL_COLLECTOR_ADDR"
 	EnvOTelTraceSampleRatio = "OTEL_TRACE_SAMPLE_RATIO"
+	EnvGoogleCloudProject   = "GOOGLE_CLOUD_PROJECT"
+	EnvGCPParameterLocation = "GCP_PARAMETER_LOCATION"
 
 	EnvR2AccountID         = "R2_ACCOUNT_ID"
 	EnvR2AccessKeyID       = "R2_ACCESS_KEY_ID"
@@ -46,6 +48,8 @@ const (
 	DefaultUserServiceGRPCAddr         = "localhost:9090"
 	DefaultDevelopmentTraceSampleRatio = "1.0"
 	DefaultStagingTraceSampleRatio     = "0.25"
+	DefaultProductionTraceSampleRatio  = "0.25"
+	DefaultGCPParameterLocation        = "global"
 
 	DefaultJWTExpiration        = "15m"
 	DefaultJWTRefreshExpiration = "720h"

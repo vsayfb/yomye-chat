@@ -26,6 +26,7 @@ type Config struct {
 	R2 R2Config
 
 	AWS AWSConfig
+	GCP GCPConfig
 }
 
 type RateLimitConfig struct {
@@ -46,6 +47,12 @@ type AWSConfig struct {
 	SQSEndpoint             string
 	SQSNotificationQueueURL string
 	SQSChatQueueURL         string
+}
+
+type GCPConfig struct {
+	ProjectID             string
+	ParameterLocation     string
+	NotificationTopicName string
 }
 
 type R2Config struct {

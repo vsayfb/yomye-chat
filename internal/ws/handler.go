@@ -108,11 +108,15 @@ type WSHandler struct {
 	attachmentSvc   *attachment.Service
 	userClient      *grpcclient.UserClient
 	gigClient       *grpcclient.GigClient
-	publisher       *mysqs.Publisher
+	publisher       notificationPublisher
 	allowAnyOrigin  bool
 	allowedOrigins  map[string]struct{}
 	messageLimiter  *ratelimit.Limiter
 	upgrader        websocket.Upgrader
+}
+
+type notificationPublisher interface {
+	PublishNewMessage(context.Context, mysqs.Envelope) error
 }
 
 func NewWSHandler(
@@ -121,7 +125,7 @@ func NewWSHandler(
 	applicationSvc application.Service,
 	conversationSvc conversation.Service,
 	attachmentSvc *attachment.Service,
-	publisher *mysqs.Publisher,
+	publisher notificationPublisher,
 	userClient *grpcclient.UserClient,
 	gigClient *grpcclient.GigClient,
 	allowAnyOrigin bool,

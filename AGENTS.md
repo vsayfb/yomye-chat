@@ -114,8 +114,8 @@ Origin policy is environment-specific. `development` deliberately accepts any
 Origin for local work. `staging` requires browser Origins to match the SSM-backed
 allowlist exactly; native clients that omit the `Origin` header remain allowed.
 The same allowlist is applied to HTTP CORS so browser clients can call
-`POST /ws/ticket`. Production will use the same SSM-backed policy under its own
-parameter path when the deferred production configuration path is enabled.
+`POST /ws/ticket`. Production applies the same policy using its Parameter
+Manager `ws-allowed-origins` value.
 
 Implementation note: application WebSocket routing resolves either `threadID` or
 `targetID` + `gigID` before upgrade. The resolver error is deliberately declared
@@ -555,12 +555,14 @@ review. Preserve these statuses unless the maintainer explicitly revisits them.
   is needed.
 - **Staging CI/CD hardening — deferred.** Test/lint/race gates, deployment
   atomicity, health verification, and rollback behavior will be reviewed later.
-- **Production configuration path — deferred.** The general production loader
-  remains unimplemented and production mode is still a blocker. The origin
-  policy decision is already fixed: production browser origins come from AWS SSM
-  under `/yevmiye/production/ws-allowed-origins`. Do not claim the service
-  supports the production environment until the remaining production
-  configuration path is intentionally designed and tested.
+- **GCP production configuration path — implemented.** Production uses Google
+  Application Default Credentials and requires `GOOGLE_CLOUD_PROJECT`.
+  `GCP_PARAMETER_LOCATION` defaults to `global`. Chat's existing parameter IDs
+  are rendered from Google Cloud Parameter Manager at `versions/latest`; the
+  legacy `sqs-notification-events-queue-url` parameter contains a fully qualified
+  Pub/Sub topic resource name in production. Production notification publishing
+  uses Pub/Sub and must not initialize an AWS SQS client. AWS staging remains
+  unchanged.
 
 ## Configuration and deployment
 
@@ -572,10 +574,12 @@ Configuration modes currently are:
   tuning remain ordinary environment settings; trace sampling defaults to 25%
   unless `OTEL_TRACE_SAMPLE_RATIO` overrides it. Rate-limit defaults require no
   staging configuration and should not be moved into SSM merely for storage.
-- `production`: the general production loader is still deferred/unimplemented.
-  The WebSocket-origin source is nevertheless decided: use the AWS SSM
-  `/yevmiye/production/ws-allowed-origins` parameter when that loader is enabled.
-  Do not claim the full production configuration path is ready yet.
+- `production`: Google Application Default Credentials plus Parameter Manager.
+  `GOOGLE_CLOUD_PROJECT` is required and `GCP_PARAMETER_LOCATION` defaults to
+  `global`. Parameter resources use
+  `projects/{project}/locations/{location}/parameters/{id}/versions/latest`.
+  Notifications publish through Pub/Sub using the fully qualified topic stored
+  under the legacy `sqs-notification-events-queue-url` parameter ID.
 
 Staging SSM parameters:
 
@@ -590,6 +594,13 @@ Staging SSM parameters:
 - `ws-allowed-origins` (comma-separated browser origins, for example
   `https://staging.example.com`; `String` is sufficient unless policy requires
   `SecureString`)
+
+Production Parameter Manager uses the same nine parameter IDs. MongoDB and R2
+credentials remain Chat configuration in Parameter Manager; this service has no
+PostgreSQL dependency and does not load a database secret from Secret Manager.
+The runtime service account needs least-privilege Parameter Manager render and
+Pub/Sub publish permissions. ADC comes from the attached Compute Engine or Cloud
+Run service account; do not deploy a service-account JSON file.
 
 Sensitive values should be `SecureString`; the runtime role needs least-
 privilege `ssm:GetParameters`, relevant `kms:Decrypt`, and `sqs:SendMessage`.
@@ -631,7 +642,9 @@ Before treating the service as internet-production-ready, explicitly review:
 - WebSocket tickets are process-local; horizontal scaling needs shared one-time
   ticket state or same-instance routing.
 - Attachment content is not signature-validated or malware-scanned.
-- The general production configuration loader remains unimplemented.
+- Production Core gRPC transport security still depends on the final topology;
+  the production configuration loader does not make a cross-cloud plaintext hop
+  safe.
 - Notification delivery remains best effort by explicit open decision; see the
   production-readiness decisions above before changing that contract.
 
