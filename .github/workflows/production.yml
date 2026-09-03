@@ -1,0 +1,109 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+
+env:
+  SERVICE_NAME: chat
+  BUILD_PATH: ./cmd/api
+  BINARY_NAME: bootstrap
+  PORT: "8081"
+  HEALTH_PATH: /ready
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: production-chat
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Build API
+        run: GOOS=linux GOARCH=amd64 go build -trimpath -o "${{ env.BINARY_NAME }}" "${{ env.BUILD_PATH }}"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Upload artifact
+        id: upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          object="${{ env.SERVICE_NAME }}/${{ github.sha }}.bin"
+          gcloud storage cp "${{ env.BINARY_NAME }}" "gs://${{ vars.GCS_DEPLOY_BUCKET }}/${object}"
+          echo "object=${object}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve production Core/Chat instance
+        id: instance
+        shell: bash
+        run: |
+          set -euo pipefail
+          instance=$(gcloud compute instance-groups managed list-instances \
+            "${{ vars.GCP_CORE_CHAT_INSTANCE_GROUP }}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "${{ vars.GCP_ZONE }}" \
+            --filter='instanceStatus=RUNNING' \
+            --format='value(instance.basename())' \
+            --limit=1)
+
+          if [[ -z "$instance" ]]; then
+            echo "No running instance found in ${{ vars.GCP_CORE_CHAT_INSTANCE_GROUP }}." >&2
+            exit 1
+          fi
+
+          echo "name=${instance}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy through IAP
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${{ steps.instance.outputs.name }}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "${{ vars.GCP_ZONE }}" \
+            --tunnel-through-iap \
+            --quiet \
+            --command "sudo env \
+              SERVICE_NAME=${{ env.SERVICE_NAME }} \
+              BINARY_NAME=${{ env.BINARY_NAME }} \
+              GCS_BUCKET=${{ vars.GCS_DEPLOY_BUCKET }} \
+              GCS_OBJECT=${{ steps.upload.outputs.object }} \
+              APP_ENV=production \
+              GOOGLE_CLOUD_PROJECT=${{ vars.GCP_PROJECT_ID }} \
+              PARAMETER_LOCATION=global \
+              /opt/deploy/remote-deploy.sh"
+
+      - name: Verify readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "${{ steps.instance.outputs.name }}" \
+            --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "${{ vars.GCP_ZONE }}" \
+            --tunnel-through-iap \
+            --quiet \
+            --command "curl --fail --show-error --silent \
+              --retry 12 --retry-delay 5 --retry-connrefused \
+              http://127.0.0.1:${{ env.PORT }}${{ env.HEALTH_PATH }} >/dev/null"
