@@ -1,12 +1,36 @@
-.PHONY: run up build rebuild down restart clean logs fresh test-unit test-unit-race test-integration test-integration-race build-smoke build-smoke-linux smoke-local
+.PHONY: run up build rebuild down restart clean logs fresh test-unit test-unit-race test-integration test-integration-race build-smoke build-smoke-linux smoke-local chat-import-checkpoint zip
 
 CORE_SMOKE_RUN_ID ?=
 CHAT_SMOKE_TARGET ?= http://127.0.0.1:8081
 CHAT_CORE_TARGET ?= http://core_svc:8080
 CHAT_SMOKE_TIMEOUT ?= 10m
+CHAT_CHECKPOINT_ARCHIVE ?= $(HOME)/Downloads/yomye-chat.zip
 
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
+
+chat-import-checkpoint:
+	@test -f "$(CHAT_CHECKPOINT_ARCHIVE)" || { echo "Missing $(CHAT_CHECKPOINT_ARCHIVE)" >&2; exit 1; }
+	@chat_import_dir="$$(mktemp -d /tmp/yomye-chat-import.XXXXXX)"; \
+	trap 'rm -rf "$$chat_import_dir"' EXIT; \
+	unzip -oqq "$(CHAT_CHECKPOINT_ARCHIVE)" -d "$$chat_import_dir"; \
+	mapfile -t module_files < <(find "$$chat_import_dir" -type f -name go.mod -not -path '*/vendor/*' -print); \
+	chat_root=''; \
+	for module_file in "$${module_files[@]}"; do \
+		if grep -Eq '^module[[:space:]]+github\.com/vsayfb/gig-platform-chat-service[[:space:]]*$$' "$$module_file"; then \
+			test -z "$$chat_root" || { echo 'Archive contains multiple Chat module roots' >&2; exit 1; }; \
+			chat_root="$$(dirname "$$module_file")"; \
+		fi; \
+	done; \
+	test -n "$$chat_root" || { echo 'Archive does not contain the Yomye Chat module' >&2; exit 1; }; \
+	rsync -a \
+		--exclude='.git' --exclude='.env*' --exclude='bin' --exclude='build' \
+		--exclude='coverage*' --exclude='Makefile' --exclude='yomye-chat*.zip' \
+		"$$chat_root/" "$(CURDIR)/"
+	@git status --short
+
+zip:
+	./tool/zip.sh
 
 run: up
 
