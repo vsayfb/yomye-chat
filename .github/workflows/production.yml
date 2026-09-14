@@ -56,25 +56,23 @@ jobs:
           gcloud storage cp "${{ env.BINARY_NAME }}" "gs://${{ vars.GCS_DEPLOY_BUCKET }}/${object}"
           echo "object=${object}" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve production Core/Chat instance
+      - name: Verify production Core/Chat instance
         id: instance
         shell: bash
         run: |
           set -euo pipefail
-          instance=$(gcloud compute instance-groups managed list-instances \
-            "${{ vars.GCP_CORE_CHAT_INSTANCE_GROUP }}" \
+          status=$(gcloud compute instances describe \
+            "${{ vars.GCP_CORE_CHAT_INSTANCE }}" \
             --project "${{ vars.GCP_PROJECT_ID }}" \
             --zone "${{ vars.GCP_ZONE }}" \
-            --filter='instanceStatus=RUNNING' \
-            --format='value(instance.basename())' \
-            --limit=1)
+            --format='value(status)')
 
-          if [[ -z "$instance" ]]; then
-            echo "No running instance found in ${{ vars.GCP_CORE_CHAT_INSTANCE_GROUP }}." >&2
+          if [[ "$status" != "RUNNING" ]]; then
+            echo "Core/Chat instance is not running: $status" >&2
             exit 1
           fi
 
-          echo "name=${instance}" >> "$GITHUB_OUTPUT"
+          echo "name=${{ vars.GCP_CORE_CHAT_INSTANCE }}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy through IAP
         shell: bash

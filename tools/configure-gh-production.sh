@@ -50,7 +50,7 @@ set_variable GCP_WORKLOAD_IDENTITY_PROVIDER "$(terraform_output github_workload_
 set_variable GCP_DEPLOY_SERVICE_ACCOUNT "$(terraform_output github_deploy_service_account)"
 set_variable GCP_PROJECT_ID "$(terraform_output project_id)"
 set_variable GCP_ZONE "$(terraform_output compute_zone)"
-set_variable GCP_CORE_CHAT_INSTANCE_GROUP "$(terraform_output core_chat_instance_group)"
+set_variable GCP_CORE_CHAT_INSTANCE "$(terraform_output core_chat_instance)"
 set_variable GCS_DEPLOY_BUCKET "$(terraform_output app_deployments_bucket)"
 
 echo "GitHub production environment configuration is complete."
