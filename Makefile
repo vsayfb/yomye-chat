@@ -1,3 +1,5 @@
+SHELL := /bin/bash
+
 .PHONY: run up build rebuild down restart clean logs fresh test-unit test-unit-race test-integration test-integration-race build-smoke build-smoke-linux smoke-local chat-import-checkpoint zip
 
 CORE_SMOKE_RUN_ID ?=

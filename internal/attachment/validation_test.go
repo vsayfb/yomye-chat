@@ -20,6 +20,8 @@ func TestValidateMediaAcceptsSupportedBoundaryValues(t *testing.T) {
 		wantMax     int64
 	}{
 		{name: "jpeg with parameters", contentType: " Image/JPEG; charset=binary ", size: MaxImageBytes, wantType: "image/jpeg", wantMax: MaxImageBytes},
+		{name: "legacy gif image", contentType: "image/gif", size: MaxImageBytes, wantType: "image/gif", wantMax: MaxImageBytes},
+		{name: "webp image", contentType: "image/webp", size: MaxImageBytes, wantType: "image/webp", wantMax: MaxImageBytes},
 		{name: "video max duration", contentType: "video/mp4", size: MaxVideoBytes, duration: MaxVideoDurationMS, wantType: "video/mp4", wantMax: MaxVideoBytes},
 	}
 

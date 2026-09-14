@@ -178,6 +178,34 @@ func TestConfirmVerifiesMetadataAndIsIdempotent(t *testing.T) {
 		repo.markReadyCalls != 1 || store.verifyCalls != 1 {
 		t.Fatalf("confirmation was not idempotent: first=%+v second=%+v", first, second)
 	}
+	if store.verifyRequest.ExpectedType != "image/jpeg" ||
+		store.verifyRequest.ExpectedSize != 100 ||
+		store.verifyRequest.MaxSizeBytes != MaxImageBytes {
+		t.Fatalf("unexpected storage verification request: %+v", store.verifyRequest)
+	}
+}
+
+func TestConfirmRejectsProviderMetadataMismatch(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo, verifyErr: r2.ErrInvalidObject}
+	service := newTestService(repo, store)
+	now := service.now()
+	id := bson.NewObjectID()
+	repo.items[id] = &Attachment{
+		ID: id, Scope: ScopeDirect, ScopeID: bson.NewObjectID(), UploaderID: "user-a",
+		ObjectKey: "chat/direct/id/object.webp", OriginalName: "photo.webp",
+		ContentType: "image/webp", SizeBytes: 512,
+		Status: StatusPendingUpload, ExpiresAt: timePointer(now.Add(time.Hour)),
+	}
+
+	if _, err := service.Confirm(context.Background(), id, "user-a"); !errors.Is(err, ErrMetadataMismatch) {
+		t.Fatalf("Confirm() error = %v, want ErrMetadataMismatch", err)
+	}
+	if repo.markReadyCalls != 0 {
+		t.Fatal("mismatched object metadata was marked ready")
+	}
 }
 
 func TestDownloadReauthorizesCurrentParticipation(t *testing.T) {
@@ -281,6 +309,8 @@ type fakeStore struct {
 	object                *r2.Object
 	presignedBeforeCreate bool
 	verifyCalls           int
+	verifyRequest         r2.VerifyRequest
+	verifyErr             error
 	downloadCalls         int
 	deleteCalls           int
 	deleteErr             error
@@ -319,8 +349,12 @@ func (s *fakeStore) PresignDownload(
 	s.downloadCalls++
 	return &r2.DownloadAuthorization{URL: "https://download"}, nil
 }
-func (s *fakeStore) Verify(context.Context, r2.VerifyRequest) (*r2.Object, error) {
+func (s *fakeStore) Verify(_ context.Context, request r2.VerifyRequest) (*r2.Object, error) {
 	s.verifyCalls++
+	s.verifyRequest = request
+	if s.verifyErr != nil {
+		return nil, s.verifyErr
+	}
 	return s.object, nil
 }
 func (s *fakeStore) Delete(context.Context, string) error {
