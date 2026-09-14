@@ -18,14 +18,11 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/pkg/middleware"
 )
 
-func TestNotificationPreviewDoesNotExposeMascotToken(t *testing.T) {
+func TestNotificationPreviewDoesNotRewriteContent(t *testing.T) {
 	t.Parallel()
 
 	preview := notificationPreview("Hello :yovmiye_happy:", 100)
-	if strings.Contains(preview, ":yovmiye_") {
-		t.Fatalf("notificationPreview() exposed raw mascot token: %q", preview)
-	}
-	if preview != "Hello [Yövmiye emojisi]" {
+	if preview != "Hello :yovmiye_happy:" {
 		t.Fatalf("notificationPreview() = %q", preview)
 	}
 }
@@ -134,15 +131,12 @@ func TestParseAttachmentIDs(t *testing.T) {
 	}
 }
 
-func TestNotificationPreviewTruncatesAfterReplacingMascotToken(t *testing.T) {
+func TestNotificationPreviewTruncatesUnicodeContent(t *testing.T) {
 	t.Parallel()
 
-	preview := notificationPreview(":yovmiye_happy: says hello", 20)
+	preview := notificationPreview("😀 says hello to everyone", 20)
 	if got := len([]rune(preview)); got > 20 {
 		t.Fatalf("notificationPreview() rune length = %d, want <= 20", got)
-	}
-	if strings.Contains(preview, ":yovmiye_") {
-		t.Fatalf("notificationPreview() exposed raw mascot token: %q", preview)
 	}
 }
 
@@ -165,15 +159,15 @@ func TestValidateMessageContentEnforcesLogicalLength(t *testing.T) {
 	}
 }
 
-func TestValidateMessageContentStillValidatesMascotTokens(t *testing.T) {
+func TestValidateMessageContentRejectsReservedCustomEmojiTokens(t *testing.T) {
 	t.Parallel()
 
 	code, _, ok := validateMessageContent("hello :yovmiye_unknown:")
 	if ok {
 		t.Fatal("unsupported mascot token was accepted")
 	}
-	if code != "invalid_emoji" {
-		t.Fatalf("invalid mascot code = %q, want invalid_emoji", code)
+	if code != "invalid_message" {
+		t.Fatalf("invalid mascot code = %q, want invalid_message", code)
 	}
 }
 

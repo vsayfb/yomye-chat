@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -17,7 +18,6 @@ import (
 	"github.com/vsayfb/gig-platform-chat-service/internal/application"
 	"github.com/vsayfb/gig-platform-chat-service/internal/attachment"
 	"github.com/vsayfb/gig-platform-chat-service/internal/conversation"
-	"github.com/vsayfb/gig-platform-chat-service/internal/messagecontent"
 	"github.com/vsayfb/gig-platform-chat-service/internal/ratelimit"
 	"github.com/vsayfb/gig-platform-chat-service/internal/wsticket"
 	"github.com/vsayfb/gig-platform-chat-service/pkg/dto"
@@ -91,11 +91,11 @@ func validateClientMessageID(clientMessageID string) (code string, message strin
 }
 
 func validateMessageContent(content string) (code string, message string, ok bool) {
-	if messagecontent.LogicalLength(content) > maxMessageLogicalLength {
-		return "message_too_long", "Message content exceeds the 4000 character limit.", false
+	if strings.Contains(strings.ToLower(content), ":yovmiye_") {
+		return "invalid_message", "Custom emoji tokens are not supported.", false
 	}
-	if err := messagecontent.Validate(content); err != nil {
-		return "invalid_emoji", "Unsupported Yövmiye emoji.", false
+	if utf8.RuneCountInString(content) > maxMessageLogicalLength {
+		return "message_too_long", "Message content exceeds the 4000 character limit.", false
 	}
 	return "", "", true
 }
@@ -1244,5 +1244,5 @@ func notificationPreview(content string, maxLength int) string {
 	if content == "" {
 		return "[Ek]"
 	}
-	return truncateForNotification(messagecontent.NotificationText(content), maxLength)
+	return truncateForNotification(content, maxLength)
 }
