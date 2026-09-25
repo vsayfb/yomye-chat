@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -65,6 +66,7 @@ func (p *unixProcessor) Process(ctx context.Context, sourceURL string, destinati
 	request.Header.Set("Content-Type", "application/json")
 	response, err := p.client.Do(request)
 	if err != nil {
+		slog.WarnContext(ctx, "media validator request failed", "stage", "transport")
 		return nil, ErrProcessorUnavailable
 	}
 	defer response.Body.Close()
@@ -72,6 +74,11 @@ func (p *unixProcessor) Process(ctx context.Context, sourceURL string, destinati
 		return nil, ErrMediaRejected
 	}
 	if response.StatusCode != http.StatusOK {
+		// The validator's response body is a fixed, non-sensitive reason. Never log
+		// the request or its signed R2 URLs.
+		reason, _ := io.ReadAll(io.LimitReader(response.Body, 128))
+		slog.WarnContext(ctx, "media validator rejected request", "validator_status", response.StatusCode,
+			"validator_reason", string(bytes.TrimSpace(reason)))
 		return nil, ErrProcessorUnavailable
 	}
 	var body struct {
@@ -79,6 +86,7 @@ func (p *unixProcessor) Process(ctx context.Context, sourceURL string, destinati
 		ProcessedMedia
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<10)).Decode(&body); err != nil || !body.Approved || body.MIME == "" || body.SizeBytes <= 0 {
+		slog.WarnContext(ctx, "media validator returned invalid approval")
 		return nil, ErrProcessorUnavailable
 	}
 	return &body.ProcessedMedia, nil
