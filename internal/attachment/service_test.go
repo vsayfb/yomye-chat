@@ -175,13 +175,17 @@ func TestConfirmVerifiesMetadataAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if first.Status != StatusReady || second.Status != StatusReady ||
-		repo.markReadyCalls != 1 || store.verifyCalls != 1 {
+		repo.markReadyCalls != 1 || store.verifyCalls != 2 {
 		t.Fatalf("confirmation was not idempotent: first=%+v second=%+v", first, second)
 	}
-	if store.verifyRequest.ExpectedType != "image/jpeg" ||
+	if store.verifyRequest.ExpectedType != "image/png" ||
 		store.verifyRequest.ExpectedSize != 100 ||
 		store.verifyRequest.MaxSizeBytes != MaxImageBytes {
 		t.Fatalf("unexpected storage verification request: %+v", store.verifyRequest)
+	}
+	if store.deletedKey != "chat/application/"+scopeID.Hex()+"/object.jpg" ||
+		first.ObjectKey != "chat/processed/"+id.Hex()+".png" {
+		t.Fatalf("clean artifact was deleted or original retained: deleted=%q ready=%q", store.deletedKey, first.ObjectKey)
 	}
 }
 
@@ -232,6 +236,36 @@ func TestDownloadReauthorizesCurrentParticipation(t *testing.T) {
 	}
 }
 
+func TestViewAllowsOnlyAuthorizedProcessedMedia(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo}
+	service := newTestService(repo, store)
+	id := bson.NewObjectID()
+	item := &Attachment{
+		ID: id, Scope: ScopeDirect, ScopeID: bson.NewObjectID(),
+		UploaderID: "user-a", ObjectKey: "chat/processed/" + id.Hex() + ".png",
+		ContentType: "image/png", Status: StatusAttached,
+	}
+	repo.items[id] = item
+	service.authorize = func(context.Context, Scope, bson.ObjectID, string) error {
+		return ErrForbidden
+	}
+	if _, err := service.View(context.Background(), id, "user-b"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("View() unauthorized error = %v", err)
+	}
+	service.authorize = func(context.Context, Scope, bson.ObjectID, string) error { return nil }
+	item.ObjectKey = "chat/direct/legacy.png"
+	if _, err := service.View(context.Background(), id, "user-a"); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("View() legacy error = %v", err)
+	}
+	item.ObjectKey = "chat/processed/" + id.Hex() + ".png"
+	result, err := service.View(context.Background(), id, "user-a")
+	if err != nil || result.URL != "https://view" {
+		t.Fatalf("View() = %+v, %v", result, err)
+	}
+}
+
 type fakeRepository struct {
 	items              map[bson.ObjectID]*Attachment
 	markReadyCalls     int
@@ -258,7 +292,8 @@ func (r *fakeRepository) FindByID(_ context.Context, id bson.ObjectID) (*Attachm
 }
 func (r *fakeRepository) MarkReady(
 	_ context.Context, id bson.ObjectID, _ string, etag string,
-	size int64, contentType string, expiresAt time.Time,
+	size int64, contentType string, objectKey string, originalName string,
+	durationMillis int64, expiresAt time.Time,
 ) (bool, error) {
 	r.markReadyCalls++
 	item := r.items[id]
@@ -267,6 +302,7 @@ func (r *fakeRepository) MarkReady(
 	}
 	item.Status, item.ETag = StatusReady, etag
 	item.SizeBytes, item.ContentType, item.ExpiresAt = size, contentType, &expiresAt
+	item.ObjectKey, item.OriginalName, item.DurationMillis = objectKey, originalName, durationMillis
 	return true, nil
 }
 func (r *fakeRepository) FindReady(
@@ -313,6 +349,7 @@ type fakeStore struct {
 	verifyErr             error
 	downloadCalls         int
 	deleteCalls           int
+	deletedKey            string
 	deleteErr             error
 	uploadCalls           int
 }
@@ -323,6 +360,12 @@ func (s *fakeStore) NewObjectKey(scope, contentType string) (string, error) {
 		extension = ".png"
 	}
 	return "chat/" + scope + "/generated" + extension, nil
+}
+func (s *fakeStore) ProcessedObjectKey(id, contentType string) (string, error) {
+	if contentType == "image/png" {
+		return "chat/processed/" + id + ".png", nil
+	}
+	return "chat/processed/" + id + ".mp4", nil
 }
 func (s *fakeStore) PresignUpload(
 	_ context.Context,
@@ -349,16 +392,24 @@ func (s *fakeStore) PresignDownload(
 	s.downloadCalls++
 	return &r2.DownloadAuthorization{URL: "https://download"}, nil
 }
+func (s *fakeStore) PresignView(context.Context, string) (*r2.DownloadAuthorization, error) {
+	return &r2.DownloadAuthorization{URL: "https://view"}, nil
+}
 func (s *fakeStore) Verify(_ context.Context, request r2.VerifyRequest) (*r2.Object, error) {
 	s.verifyCalls++
 	s.verifyRequest = request
 	if s.verifyErr != nil {
 		return nil, s.verifyErr
 	}
+	if request.Key != s.object.Key {
+		return &r2.Object{Key: request.Key, ContentType: request.ExpectedType,
+			SizeBytes: request.ExpectedSize, ETag: "clean-etag"}, nil
+	}
 	return s.object, nil
 }
-func (s *fakeStore) Delete(context.Context, string) error {
+func (s *fakeStore) Delete(_ context.Context, key string) error {
 	s.deleteCalls++
+	s.deletedKey = key
 	return s.deleteErr
 }
 
@@ -367,10 +418,21 @@ func newTestService(repo Repository, store ObjectStore) *Service {
 		repo, store, nil,
 		func(context.Context, Scope, bson.ObjectID, string) error { return nil },
 		func(context.Context, Scope, string, string, string) error { return nil },
+		fakeProcessor{},
 	)
 	fixed := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return fixed }
 	return service
+}
+
+type fakeProcessor struct{}
+
+func (fakeProcessor) Process(_ context.Context, _ string, _ *r2.UploadAuthorization,
+	mime string, _ int64, duration int64) (*ProcessedMedia, error) {
+	if strings.HasPrefix(mime, "video/") {
+		return &ProcessedMedia{MIME: "video/mp4", SizeBytes: 100, DurationMillis: duration}, nil
+	}
+	return &ProcessedMedia{MIME: "image/png", SizeBytes: 100}, nil
 }
 
 func timePointer(value time.Time) *time.Time { return &value }

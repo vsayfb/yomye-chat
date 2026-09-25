@@ -321,6 +321,7 @@ func main() {
 	attachmentSvc := attachment.NewService(
 		attachmentRepo, r2Client, mongoClient,
 		authorizeAttachment, authorizeFirstAttachment,
+		attachment.NewUnixProcessor("/run/yomye-media-validator/validator.sock"),
 	)
 	attachmentHandler := attachment.NewHandler(attachmentSvc)
 
@@ -486,6 +487,7 @@ func main() {
 		r.Use(authMiddleware)
 		r.With(httpWriteRateLimit).Post("/{attachmentID}/confirm", attachmentHandler.Confirm)
 		r.With(httpReadRateLimit).Get("/{attachmentID}/download", attachmentHandler.Download)
+		r.With(httpReadRateLimit).Get("/{attachmentID}/view", attachmentHandler.View)
 	})
 
 	cleanupCtx, cleanupCancel := context.WithCancel(ctx)

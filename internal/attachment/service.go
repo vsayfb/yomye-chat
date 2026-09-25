@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"mime"
 	"path"
 	"strings"
@@ -58,8 +59,10 @@ type FirstContactAuthorizer func(
 
 type ObjectStore interface {
 	NewObjectKey(scope, contentType string) (string, error)
+	ProcessedObjectKey(attachmentID, contentType string) (string, error)
 	PresignUpload(context.Context, r2.UploadRequest) (*r2.UploadAuthorization, error)
 	PresignDownload(context.Context, string, string) (*r2.DownloadAuthorization, error)
+	PresignView(context.Context, string) (*r2.DownloadAuthorization, error)
 	Verify(context.Context, r2.VerifyRequest) (*r2.Object, error)
 	Delete(context.Context, string) error
 }
@@ -70,6 +73,7 @@ type Service struct {
 	client         *mongo.Client
 	authorize      ScopeAuthorizer
 	authorizeFirst FirstContactAuthorizer
+	processor      Processor
 	now            func() time.Time
 }
 
@@ -79,12 +83,17 @@ func NewService(
 	client *mongo.Client,
 	authorize ScopeAuthorizer,
 	authorizeFirst FirstContactAuthorizer,
+	processors ...Processor,
 ) *Service {
-	return &Service{
+	s := &Service{
 		repo: repo, store: store, client: client,
 		authorize: authorize, authorizeFirst: authorizeFirst,
 		now: func() time.Time { return time.Now().UTC() },
 	}
+	if len(processors) > 0 {
+		s.processor = processors[0]
+	}
+	return s
 }
 
 func (s *Service) AuthorizeFirstContactUpload(
@@ -272,7 +281,7 @@ func (s *Service) Confirm(
 	if err != nil {
 		return nil, err
 	}
-	object, err := s.store.Verify(ctx, r2.VerifyRequest{
+	_, err = s.store.Verify(ctx, r2.VerifyRequest{
 		Key: item.ObjectKey, ExpectedType: item.ContentType,
 		ExpectedSize: item.SizeBytes, MaxSizeBytes: maxSize,
 	})
@@ -283,11 +292,69 @@ func (s *Service) Confirm(
 		}
 		return nil, err
 	}
+	if s.processor == nil {
+		return nil, ErrProcessorUnavailable
+	}
+	cleanType := "image/png"
+	cleanExtension := ".png"
+	if strings.HasPrefix(item.ContentType, "video/") {
+		cleanType = "video/mp4"
+		cleanExtension = ".mp4"
+	}
+	cleanKey, err := s.store.ProcessedObjectKey(id.Hex(), cleanType)
+	if err != nil {
+		return nil, err
+	}
+	cleanAuthorization, err := s.store.PresignUpload(ctx, r2.UploadRequest{
+		Key: cleanKey, ContentType: cleanType, SizeBytes: maxSize, MaxSizeBytes: maxSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+	sourceAuthorization, err := s.store.PresignDownload(ctx, item.ObjectKey, item.OriginalName)
+	if err != nil {
+		return nil, err
+	}
+	processed, err := s.processor.Process(ctx, sourceAuthorization.URL, cleanAuthorization,
+		item.ContentType, maxSize, item.DurationMillis)
+	if err != nil {
+		if !errors.Is(err, ErrProcessorUnavailable) {
+			return nil, err
+		}
+		// The validator may have completed its write-once PUT before its response
+		// was lost. Only the validator ever receives a signed PUT for this key.
+		prior, verifyErr := s.store.Verify(ctx, r2.VerifyRequest{
+			Key: cleanKey, ExpectedType: cleanType, MaxSizeBytes: maxSize,
+		})
+		if verifyErr != nil {
+			return nil, err
+		}
+		processed = &ProcessedMedia{MIME: cleanType, SizeBytes: prior.SizeBytes}
+		if cleanType == "video/mp4" {
+			processed.DurationMillis = item.DurationMillis
+		}
+	}
+	if processed.MIME != cleanType || processed.SizeBytes <= 0 || processed.SizeBytes > maxSize ||
+		(strings.HasPrefix(cleanType, "video/") && (processed.DurationMillis <= 0 || processed.DurationMillis > MaxVideoDurationMS)) ||
+		(cleanType == "image/png" && processed.DurationMillis != 0) {
+		return nil, ErrMetadataMismatch
+	}
+	cleanObject, err := s.store.Verify(ctx, r2.VerifyRequest{
+		Key: cleanKey, ExpectedType: cleanType, ExpectedSize: processed.SizeBytes, MaxSizeBytes: maxSize,
+	})
+	if err != nil {
+		if errors.Is(err, r2.ErrInvalidObject) {
+			return nil, ErrMetadataMismatch
+		}
+		return nil, err
+	}
+	name := strings.TrimSuffix(item.OriginalName, path.Ext(item.OriginalName)) + cleanExtension
+	originalKey := item.ObjectKey
 
 	readyExpiry := now.Add(ReadyTTL)
 	updated, err := s.repo.MarkReady(
-		ctx, id, uploaderID, object.ETag, object.SizeBytes,
-		object.ContentType, readyExpiry,
+		ctx, id, uploaderID, cleanObject.ETag, cleanObject.SizeBytes,
+		cleanObject.ContentType, cleanKey, name, processed.DurationMillis, readyExpiry,
 	)
 	if err != nil {
 		return nil, err
@@ -305,11 +372,17 @@ func (s *Service) Confirm(
 	}
 
 	item.Status = StatusReady
-	item.ETag = object.ETag
-	item.SizeBytes = object.SizeBytes
-	item.ContentType = object.ContentType
+	item.ETag = cleanObject.ETag
+	item.ObjectKey = cleanKey
+	item.OriginalName = name
+	item.SizeBytes = cleanObject.SizeBytes
+	item.ContentType = cleanObject.ContentType
+	item.DurationMillis = processed.DurationMillis
 	item.ExpiresAt = &readyExpiry
 	item.UpdatedAt = now
+	if err := s.store.Delete(ctx, originalKey); err != nil {
+		slog.WarnContext(ctx, "could not delete quarantined attachment object", "err", err)
+	}
 	return item, nil
 }
 
@@ -349,6 +422,28 @@ func (s *Service) Download(
 		return nil, err
 	}
 	return &DownloadResult{URL: authorization.URL, ExpiresAt: authorization.ExpiresAt}, nil
+}
+
+func (s *Service) View(ctx context.Context, id bson.ObjectID, userID string) (*DownloadResult, error) {
+	item, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if item == nil || (item.Status != StatusReady && item.Status != StatusAttached) || item.Provisional {
+		return nil, ErrNotFound
+	}
+	if err := s.authorize(ctx, item.Scope, item.ScopeID, userID); err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(item.ObjectKey, "chat/processed/") ||
+		(item.ContentType != "image/png" && item.ContentType != "video/mp4") {
+		return nil, ErrInvalidState
+	}
+	url, err := s.store.PresignView(ctx, item.ObjectKey)
+	if err != nil {
+		return nil, err
+	}
+	return &DownloadResult{URL: url.URL, ExpiresAt: url.ExpiresAt}, nil
 }
 
 // CommitMessage runs message creation and READY -> ATTACHED transitions in one

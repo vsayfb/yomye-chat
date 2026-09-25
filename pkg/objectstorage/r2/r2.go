@@ -5,6 +5,7 @@ package r2
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"mime"
@@ -127,6 +128,24 @@ func (c *Client) NewObjectKey(scope, contentType string) (string, error) {
 	return path.Join(c.cfg.ObjectPrefix, scope, uuid.NewString()+extension), nil
 }
 
+// ProcessedObjectKey is stable across confirmation retries. The uploader never
+// receives an authorization for this key; only the validator receives its
+// write-once PUT URL.
+func (c *Client) ProcessedObjectKey(attachmentID, contentType string) (string, error) {
+	decoded, err := hex.DecodeString(attachmentID)
+	if err != nil || len(decoded) != 12 {
+		return "", ErrInvalidObjectKey
+	}
+	if contentType != "image/png" && contentType != "video/mp4" {
+		return "", ErrUnsupportedMedia
+	}
+	key := path.Join(c.cfg.ObjectPrefix, "processed", attachmentID+allowedMediaTypes[contentType])
+	if err := c.validateKey(key); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
 func (c *Client) PresignUpload(
 	ctx context.Context,
 	request UploadRequest,
@@ -194,6 +213,25 @@ func (c *Client) PresignDownload(
 	return &DownloadAuthorization{
 		URL: result.URL, ExpiresAt: time.Now().UTC().Add(c.cfg.DownloadURLExpiry),
 	}, nil
+}
+
+// PresignView is only for normalized, authorization-checked media. Callers
+// must reject legacy/unprocessed keys before requesting an inline URL.
+func (c *Client) PresignView(ctx context.Context, key string) (*DownloadAuthorization, error) {
+	if err := c.validateKey(key); err != nil {
+		return nil, err
+	}
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(c.cfg.Bucket), Key: aws.String(key),
+		ResponseContentDisposition: aws.String("inline"),
+	}
+	result, err := c.presign.PresignGetObject(ctx, input, func(options *s3.PresignOptions) {
+		options.Expires = c.cfg.DownloadURLExpiry
+	})
+	if err != nil {
+		return nil, fmt.Errorf("presign R2 view: %w", err)
+	}
+	return &DownloadAuthorization{URL: result.URL, ExpiresAt: time.Now().UTC().Add(c.cfg.DownloadURLExpiry)}, nil
 }
 
 func (c *Client) Head(ctx context.Context, key string) (object *Object, err error) {

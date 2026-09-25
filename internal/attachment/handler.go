@@ -141,6 +141,19 @@ func (h *Handler) Download(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, result)
 }
 
+func (h *Handler) View(w http.ResponseWriter, r *http.Request) {
+	id, ok := attachmentID(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.View(r.Context(), id, middleware.GetUserID(r.Context()))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, result)
+}
+
 func attachmentID(w http.ResponseWriter, r *http.Request) (bson.ObjectID, bool) {
 	id, err := bson.ObjectIDFromHex(chi.URLParam(r, "attachmentID"))
 	if err != nil {
@@ -172,6 +185,10 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		httputil.WriteError(w, http.StatusConflict, "Attachment is not available")
 	case errors.Is(err, ErrMetadataMismatch):
 		httputil.WriteError(w, http.StatusUnprocessableEntity, "Uploaded object does not match")
+	case errors.Is(err, ErrMediaRejected):
+		httputil.WriteError(w, http.StatusUnprocessableEntity, "Attachment failed media validation")
+	case errors.Is(err, ErrProcessorUnavailable):
+		httputil.WriteError(w, http.StatusServiceUnavailable, "Media validation is temporarily unavailable")
 	default:
 		slog.ErrorContext(r.Context(), "attachment request failed", "error", err)
 		httputil.WriteError(w, http.StatusInternalServerError, "Attachment request failed")

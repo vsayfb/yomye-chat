@@ -217,6 +217,7 @@ func newTestEnv(t *testing.T, options testEnvOptions) *testEnv {
 
 	router.Route("/applications", func(r chi.Router) {
 		r.Use(auth)
+		r.With(readRateLimit).Get("/me", appHandler.ListApplications)
 		r.With(readRateLimit).Get("/{threadID}", appHandler.GetApplication)
 		r.With(readRateLimit).Get("/{threadID}/messages", appHandler.ListMessages)
 		r.With(writeRateLimit).Post("/{threadID}/approve", appHandler.ApproveApplication)
@@ -224,6 +225,7 @@ func newTestEnv(t *testing.T, options testEnvOptions) *testEnv {
 	})
 	router.Route("/conversations", func(r chi.Router) {
 		r.Use(auth)
+		r.With(readRateLimit).Get("/me", convHandler.List)
 		r.With(readRateLimit).Get("/{conversationID}", convHandler.Get)
 		r.With(readRateLimit).Get("/{conversationID}/messages", convHandler.ListMessages)
 	})

@@ -1,6 +1,10 @@
 services:
   mongodb:
     image: mongo:8
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     command:
       - mongod
       - --port

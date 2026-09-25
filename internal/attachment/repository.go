@@ -23,6 +23,9 @@ type Repository interface {
 		etag string,
 		size int64,
 		contentType string,
+		objectKey string,
+		originalName string,
+		durationMillis int64,
 		expiresAt time.Time,
 	) (bool, error)
 	FindReady(
@@ -134,6 +137,9 @@ func (r *repository) MarkReady(
 	etag string,
 	size int64,
 	contentType string,
+	objectKey string,
+	originalName string,
+	durationMillis int64,
 	expiresAt time.Time,
 ) (bool, error) {
 	now := time.Now().UTC()
@@ -143,7 +149,9 @@ func (r *repository) MarkReady(
 	}, bson.M{
 		"$set": bson.M{
 			"status": StatusReady, "etag": etag, "size_bytes": size,
-			"content_type": contentType, "expires_at": expiresAt, "updated_at": now,
+			"content_type": contentType, "object_key": objectKey,
+			"original_filename": originalName, "duration_ms": durationMillis,
+			"expires_at": expiresAt, "updated_at": now,
 		},
 	})
 	return result != nil && result.ModifiedCount == 1, err
