@@ -215,8 +215,8 @@ func (c *Client) PresignDownload(
 	}, nil
 }
 
-// PresignView is only for normalized, authorization-checked media. Callers
-// must reject legacy/unprocessed keys before requesting an inline URL.
+// PresignView signs an authorized attachment for inline delivery. Callers must
+// check participation, attachment state, and allowed media type first.
 func (c *Client) PresignView(ctx context.Context, key string) (*DownloadAuthorization, error) {
 	if err := c.validateKey(key); err != nil {
 		return nil, err

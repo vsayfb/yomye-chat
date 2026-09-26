@@ -458,8 +458,13 @@ func (s *Service) View(ctx context.Context, id bson.ObjectID, userID string) (*D
 	if err := s.authorize(ctx, item.Scope, item.ScopeID, userID); err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(item.ObjectKey, "chat/processed/") ||
-		(item.ContentType != "image/png" && item.ContentType != "video/mp4") {
+	processed := strings.HasPrefix(item.ObjectKey, "chat/processed/") &&
+		(item.ContentType == "image/png" || item.ContentType == "video/mp4")
+	original := (strings.HasPrefix(item.ObjectKey, "chat/conversations/") ||
+		strings.HasPrefix(item.ObjectKey, "chat/applications/") ||
+		strings.HasPrefix(item.ObjectKey, "chat/pending/")) &&
+		isViewableOriginalType(item.ContentType)
+	if !processed && !original {
 		return nil, ErrInvalidState
 	}
 	url, err := s.store.PresignView(ctx, item.ObjectKey)
@@ -467,6 +472,16 @@ func (s *Service) View(ctx context.Context, id bson.ObjectID, userID string) (*D
 		return nil, err
 	}
 	return &DownloadResult{URL: url.URL, ExpiresAt: url.ExpiresAt}, nil
+}
+
+func isViewableOriginalType(contentType string) bool {
+	switch contentType {
+	case "image/jpeg", "image/png", "image/webp", "image/gif",
+		"video/mp4", "video/quicktime", "video/webm":
+		return true
+	default:
+		return false
+	}
 }
 
 // CommitMessage runs message creation and READY -> ATTACHED transitions in one

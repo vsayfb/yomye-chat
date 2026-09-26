@@ -261,7 +261,7 @@ func TestDownloadReauthorizesCurrentParticipation(t *testing.T) {
 	}
 }
 
-func TestViewAllowsOnlyAuthorizedProcessedMedia(t *testing.T) {
+func TestViewAllowsAuthorizedProcessedAndOriginalMedia(t *testing.T) {
 	t.Parallel()
 	repo := newFakeRepository()
 	store := &fakeStore{repo: repo}
@@ -282,12 +282,26 @@ func TestViewAllowsOnlyAuthorizedProcessedMedia(t *testing.T) {
 	service.authorize = func(context.Context, Scope, bson.ObjectID, string) error { return nil }
 	item.ObjectKey = "chat/direct/legacy.png"
 	if _, err := service.View(context.Background(), id, "user-a"); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("View() legacy error = %v", err)
+		t.Fatalf("View() invalid key error = %v", err)
 	}
 	item.ObjectKey = "chat/processed/" + id.Hex() + ".png"
 	result, err := service.View(context.Background(), id, "user-a")
 	if err != nil || result.URL != "https://view" {
 		t.Fatalf("View() = %+v, %v", result, err)
+	}
+	for _, tc := range []struct{ key, contentType string }{
+		{"chat/conversations/abc/original.webp", "image/webp"},
+		{"chat/applications/abc/original.mov", "video/quicktime"},
+		{"chat/pending/direct/abc/original.gif", "image/gif"},
+	} {
+		item.ObjectKey, item.ContentType = tc.key, tc.contentType
+		if result, err := service.View(context.Background(), id, "user-a"); err != nil || result.URL != "https://view" {
+			t.Fatalf("View(%q) = %+v, %v", tc.key, result, err)
+		}
+	}
+	item.ContentType = "text/html"
+	if _, err := service.View(context.Background(), id, "user-a"); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("View() unsupported type error = %v", err)
 	}
 }
 
