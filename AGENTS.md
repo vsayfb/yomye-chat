@@ -326,24 +326,21 @@ object placement is not authorization, so access remains attachment-ID based.
 
 Downloads resolve by attachment ID, load the record, recheck current
 participation, and only then issue a short-lived presigned GET. URLs are never
-stored as attachment URLs. Downloads currently force attachment disposition;
-there is intentionally no inline-view endpoint.
+stored as attachment URLs. Downloads force attachment disposition; authorized
+inline views use a separate short-lived presigned URL.
 
 ## Attachment threat-model limitations
 
-Current verification proves key namespace, declared/stored MIME metadata, and
-exact object size. It does **not** prove magic bytes, decode safety, malware
-absence, codec safety, or real video duration. A malicious file can lie through
-metadata. Forced download reduces browser rendering exposure but does not make
-the file safe.
+With `ENABLE_MEDIA_VALIDATOR` unset/false, verification proves key namespace,
+declared/stored MIME metadata, and exact object size. It does **not** prove
+magic bytes, decode safety, malware absence, codec safety, or real video
+duration. A malicious file can lie through metadata. Authorized inline views
+therefore render original bytes without content inspection.
 
-Do not add inline rendering or broaden file types until there is a shared
-app-wide quarantine/scanning pipeline. The preferred future flow is
-`PENDING_UPLOAD -> QUARANTINED/PROCESSING -> READY` with sandboxed signature
-inspection, bounded image decode/re-encode, `ffprobe` video validation, and
-malware scanning. This belongs in shared media infrastructure because Core's
-Cloudinary media has the same general content-validation concern. Each service
-must still retain its own authorization and lifecycle ownership.
+With `ENABLE_MEDIA_VALIDATOR=true`, Chat passes the private original through
+the separate validator and stores a normalized READY copy. The validator does
+not perform malware scanning. This flag is server-side; the client consumes
+the returned metadata in either mode.
 
 ## HTTP API
 

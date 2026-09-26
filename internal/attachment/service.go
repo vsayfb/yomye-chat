@@ -281,7 +281,7 @@ func (s *Service) Confirm(
 	if err != nil {
 		return nil, err
 	}
-	_, err = s.store.Verify(ctx, r2.VerifyRequest{
+	original, err := s.store.Verify(ctx, r2.VerifyRequest{
 		Key: item.ObjectKey, ExpectedType: item.ContentType,
 		ExpectedSize: item.SizeBytes, MaxSizeBytes: maxSize,
 	})
@@ -293,7 +293,30 @@ func (s *Service) Confirm(
 		return nil, err
 	}
 	if s.processor == nil {
-		return nil, ErrProcessorUnavailable
+		readyExpiry := now.Add(ReadyTTL)
+		updated, err := s.repo.MarkReady(ctx, id, uploaderID, original.ETag,
+			original.SizeBytes, original.ContentType, item.ObjectKey,
+			item.OriginalName, item.DurationMillis, readyExpiry)
+		if err != nil {
+			return nil, err
+		}
+		if !updated {
+			current, findErr := s.repo.FindByID(ctx, id)
+			if findErr != nil {
+				return nil, findErr
+			}
+			if current != nil && (current.Status == StatusReady || current.Status == StatusAttached) {
+				return current, nil
+			}
+			return nil, ErrInvalidState
+		}
+		item.Status = StatusReady
+		item.ETag = original.ETag
+		item.SizeBytes = original.SizeBytes
+		item.ContentType = original.ContentType
+		item.ExpiresAt = &readyExpiry
+		item.UpdatedAt = now
+		return item, nil
 	}
 	cleanType := "image/png"
 	cleanExtension := ".png"

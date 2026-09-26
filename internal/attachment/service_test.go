@@ -212,6 +212,31 @@ func TestConfirmRejectsProviderMetadataMismatch(t *testing.T) {
 	}
 }
 
+func TestConfirmWithoutValidatorKeepsOriginal(t *testing.T) {
+	t.Parallel()
+	repo := newFakeRepository()
+	store := &fakeStore{repo: repo}
+	service := newTestService(repo, store)
+	service.processor = nil
+	id := bson.NewObjectID()
+	key := "chat/conversations/test/original.webp"
+	now := service.now()
+	repo.items[id] = &Attachment{
+		ID: id, Scope: ScopeDirect, ScopeID: bson.NewObjectID(), UploaderID: "user-a",
+		ObjectKey: key, OriginalName: "original.webp", ContentType: "image/webp",
+		SizeBytes: 512, Status: StatusPendingUpload, ExpiresAt: timePointer(now.Add(time.Hour)),
+	}
+	store.object = &r2.Object{Key: key, ContentType: "image/webp", SizeBytes: 512, ETag: "etag"}
+	item, err := service.Confirm(context.Background(), id, "user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Status != StatusReady || item.ObjectKey != key || item.ContentType != "image/webp" ||
+		store.verifyCalls != 1 || store.uploadCalls != 0 || store.downloadCalls != 0 || store.deleteCalls != 0 {
+		t.Fatalf("direct confirmation changed original or used validator path: item=%+v store=%+v", item, store)
+	}
+}
+
 func TestDownloadReauthorizesCurrentParticipation(t *testing.T) {
 	t.Parallel()
 

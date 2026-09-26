@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -318,10 +319,14 @@ func main() {
 			return attachment.ErrInvalidInput
 		}
 	}
+	var mediaProcessor attachment.Processor
+	if strings.EqualFold(os.Getenv("ENABLE_MEDIA_VALIDATOR"), "true") {
+		mediaProcessor = attachment.NewUnixProcessor("/run/yomye-media-validator/validator.sock")
+	}
 	attachmentSvc := attachment.NewService(
 		attachmentRepo, r2Client, mongoClient,
 		authorizeAttachment, authorizeFirstAttachment,
-		attachment.NewUnixProcessor("/run/yomye-media-validator/validator.sock"),
+		mediaProcessor,
 	)
 	attachmentHandler := attachment.NewHandler(attachmentSvc)
 
